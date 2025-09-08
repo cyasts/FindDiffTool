@@ -1,5 +1,6 @@
 import json
 import os
+import shutil
 import time
 from dataclasses import dataclass, asdict
 import math
@@ -1338,9 +1339,18 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
                 return
         except Exception:
             pass
+        # capture indices/count before mutation for file renaming
+        deleted_index = idx + 1
+        old_count = len(self.differences)
+
         d = self.differences.pop(idx)
         u = self.rect_items_up.pop(d.id, None)
         dn = self.rect_items_down.pop(d.id, None)
+        # remove needAI entry for this id
+        try:
+            self.need_ai_by_id.pop(d.id, None)
+        except Exception:
+            pass
         # also remove AI overlays for this diff
         ou = self.ai_overlays_up.pop(d.id, None)
         od = self.ai_overlays_down.pop(d.id, None)
@@ -1358,7 +1368,38 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
             self.up_scene.removeItem(u)
         if dn:
             self.down_scene.removeItem(dn)
-        # reindex titles by rebuilding lists
+        # 1) 删除对应 AI 输出图片，并重命名后续序号
+        try:
+            level_dir = self.level_dir()
+            # 删除 region{deleted_index}.png
+            victim = os.path.join(level_dir, f"region{deleted_index}.png")
+            if os.path.isfile(victim):
+                os.remove(victim)
+            # 将 region{i}.png -> region{i-1}.png (i 从 deleted_index+1 到 old_count)
+            for i in range(deleted_index + 1, old_count + 1):
+                src = os.path.join(level_dir, f"region{i}.png")
+                dst = os.path.join(level_dir, f"region{i-1}.png")
+                if os.path.isfile(src):
+                    # 若目标已存在（理论上不该发生），先移除目标以避免跨平台报错
+                    if os.path.isfile(dst):
+                        os.remove(dst)
+                    shutil.move(src, dst)
+        except Exception:
+            # 静默处理文件系统异常，避免影响UI流
+            pass
+
+        # 2) 立即持久化当前配置与元信息（不做校验，避免未填写文本阻塞）
+        try:
+            self._write_config_snapshot()
+        except Exception:
+            pass
+        try:
+            # 状态置为未保存，写入 meta（包含 needAI 重排）
+            self._write_meta_status('unsaved', persist=True)
+        except Exception:
+            pass
+
+        # 3) reindex titles by rebuilding lists
         self.rebuild_lists()
         if getattr(self, '_selected_diff_id', None) == diff_id:
             self._set_selected_diff(None)
@@ -1864,6 +1905,69 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
         except Exception as exc:
             QtWidgets.QMessageBox.critical(self, "保存失败", str(exc))
         self._update_status_bar()
+
+    def _write_config_snapshot(self) -> None:
+        """Write current differences to config.json without validation or UI side-effects.
+        Keeps the on-disk config in sync after deletions/renames.
+        """
+        # natural size = scene size
+        w = self.up_scene.width()
+        h = self.up_scene.height()
+
+        def to_percent_y_bottom(y_px: float) -> float:
+            return 1.0 - (y_px / h)
+
+        def to_percent_x(x_px: float) -> float:
+            return x_px / w
+
+        data = {
+            "differenceCount": len(self.differences),
+            "differences": []
+        }
+        for d in self.differences:
+            points = [
+                {"x": to_percent_x(d.x), "y": to_percent_y_bottom(d.y)},
+                {"x": to_percent_x(d.x + d.width), "y": to_percent_y_bottom(d.y)},
+                {"x": to_percent_x(d.x + d.width), "y": to_percent_y_bottom(d.y + d.height)},
+                {"x": to_percent_x(d.x), "y": to_percent_y_bottom(d.y + d.height)},
+            ]
+            r_w, r_h = d.width, d.height
+            if d.section == 'up':
+                cx_local = d.circle_up_x if d.circle_up_x >= 0 else r_w / 2.0
+                cy_local = d.circle_up_y if d.circle_up_y >= 0 else r_h / 2.0
+                lvl = d.hint_level_up
+            else:
+                cx_local = d.circle_down_x if d.circle_down_x >= 0 else r_w / 2.0
+                cy_local = d.circle_down_y if d.circle_down_y >= 0 else r_h / 2.0
+                lvl = d.hint_level_down
+            if lvl > 0 and lvl <= len(RADIUS_LEVELS):
+                radius_px = float(RADIUS_LEVELS[lvl - 1])
+            else:
+                radius_px = min(r_w, r_h) / 2.0
+
+            data["differences"].append({
+                "id": d.id,
+                "name": d.name,
+                "section": ('down' if d.section == 'down' else 'up'),
+                "category": d.category or "",
+                "label": d.label or "",
+                "enabled": bool(d.enabled),
+                "points": points,
+                "hintCircle": {
+                    "x": to_percent_x(d.x + cx_local),
+                    "y": to_percent_y_bottom(d.y + cy_local),
+                    "radius": radius_px / 20.0,
+                    "isDragged": False,
+                    "visible": True
+                },
+                "hintLevel": int(lvl),
+                "circleLocal": {"x": cx_local, "y": cy_local}
+            })
+
+        os.makedirs(self.level_dir(), exist_ok=True)
+        cfg_path = self.config_json_path()
+        with open(cfg_path, 'w', encoding='utf-8') as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
 
     def load_existing_config(self) -> None:
         dir_path = self.level_dir()
