@@ -1,0 +1,142 @@
+name: Build desktop packages
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - "**"
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  macos-universal:
+    name: macOS universal build
+    runs-on: macos-14
+    env:
+      PIP_ONLY_BINARY: ":all:"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip setuptools wheel
+          pip install -r requirements.txt
+          pip install "pyinstaller>=6.9,<7" "altgraph>=0.17.4" "macholib>=1.16.3"
+
+      - name: Build macOS universal app
+        shell: bash
+        run: |
+          set -euo pipefail
+          PYI_ARGS=(
+            --noconfirm
+            --name FindDiffEditor
+            --windowed
+            --target-arch universal2
+            --add-data "banana.py:."
+            --hidden-import PIL
+            --hidden-import requests
+          )
+          if [ -f "Icon.icns" ]; then
+            PYI_ARGS+=(--icon "Icon.icns")
+          fi
+          pyinstaller "${PYI_ARGS[@]}" main.py
+
+      - name: Create DMG
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP_PATH="dist/FindDiffEditor.app"
+          [ -d "$APP_PATH" ] || { echo "App not built: $APP_PATH" >&2; exit 1; }
+          hdiutil create -volname "FindDiffEditor" -srcfolder "$APP_PATH" -ov -format UDZO "dist/FindDiffEditor-universal.dmg"
+
+      - name: Upload macOS DMG
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-Universal-DMG
+          path: dist/FindDiffEditor-universal.dmg
+
+  windows:
+    name: Windows build
+    runs-on: windows-latest
+    env:
+      PIP_ONLY_BINARY: ":all:"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip setuptools wheel
+          pip install -r requirements.txt
+          pip install "pyinstaller>=6.9,<7"
+
+      - name: Build Windows app
+        shell: pwsh
+        run: |
+          $pyiArgs = @(
+            "--noconfirm",
+            "--name", "FindDiffEditor",
+            "--windowed",
+            "--add-data", "banana.py;.",
+            "--hidden-import", "PIL",
+            "--hidden-import", "requests"
+          )
+          # Optional icon: provide Icon.ico at repo root to enable the following
+          if (Test-Path "Icon.ico") { $pyiArgs += @("--icon", "Icon.ico") }
+          pyinstaller @pyiArgs main.py
+
+      - name: Zip Windows dist
+        shell: pwsh
+        run: |
+          $distDir = "dist/FindDiffEditor"
+          if (-not (Test-Path $distDir)) { throw "Dist not found: $distDir" }
+          Compress-Archive -Path "$distDir/*" -DestinationPath "dist/FindDiffEditor-windows.zip" -Force
+
+      - name: Upload Windows artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-zip
+          path: dist/FindDiffEditor-windows.zip
+
+  release:
+    name: Create GitHub Release
+    runs-on: ubuntu-latest
+    needs: [macos-universal, windows]
+    if: startsWith(github.ref, 'refs/tags/')
+    steps:
+      - name: Download macOS artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: macos-Universal-DMG
+          path: artifacts/macos
+
+      - name: Download Windows artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: windows-zip
+          path: artifacts/windows
+
+      - name: Create Release and Upload Assets
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            artifacts/**/*.dmg
+            artifacts/**/*.zip
+          draft: false
+          prerelease: false
+
+
