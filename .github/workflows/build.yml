@@ -26,43 +26,22 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install dependencies
+      - name: Install Rosetta (for x86_64 fallback build)
         run: |
-          python -m pip install --upgrade pip setuptools wheel
-          pip install -r requirements.txt
-          pip install "pyinstaller>=6.9,<7" "altgraph>=0.17.4" "macholib>=1.16.3"
+          softwareupdate --install-rosetta --agree-to-license || true
 
-      - name: Build macOS universal app
+      - name: Build via package.sh (universal with fallback)
         shell: bash
         run: |
           set -euo pipefail
-          PYI_ARGS=(
-            --noconfirm
-            --name FindDiffEditor
-            --windowed
-            --target-arch universal2
-            --add-data "banana.py:."
-            --hidden-import PIL
-            --hidden-import requests
-          )
-          if [ -f "Icon.icns" ]; then
-            PYI_ARGS+=(--icon "Icon.icns")
-          fi
-          pyinstaller "${PYI_ARGS[@]}" main.py
+          bash package.sh mac-universal
 
-      - name: Create DMG
-        shell: bash
-        run: |
-          set -euo pipefail
-          APP_PATH="dist/FindDiffEditor.app"
-          [ -d "$APP_PATH" ] || { echo "App not built: $APP_PATH" >&2; exit 1; }
-          hdiutil create -volname "FindDiffEditor" -srcfolder "$APP_PATH" -ov -format UDZO "dist/FindDiffEditor-universal.dmg"
-
-      - name: Upload macOS DMG
+      - name: Upload macOS DMGs
         uses: actions/upload-artifact@v4
         with:
-          name: macos-Universal-DMG
-          path: dist/FindDiffEditor-universal.dmg
+          name: macos-packages
+          path: |
+            dist/*.dmg
 
   windows:
     name: Windows build
@@ -121,7 +100,7 @@ jobs:
       - name: Download macOS artifact
         uses: actions/download-artifact@v4
         with:
-          name: macos-Universal-DMG
+          name: macos-packages
           path: artifacts/macos
 
       - name: Download Windows artifact

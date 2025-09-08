@@ -11,7 +11,13 @@ if [ -f "pyside_app/main.py" ]; then
 else
   APP_DIR="."
 fi
-ICON_PATH="$APP_DIR/i.icns"
+ICON_PATH="Icon.icns"
+if [ ! -f "$ICON_PATH" ]; then
+  ICON_PATH="$APP_DIR/i.icns"
+fi
+if [ ! -f "$ICON_PATH" ] && [ -f "i.icns" ]; then
+  ICON_PATH="i.icns"
+fi
 
 ensure_tools_for_arch() {
   local VENV=$1
@@ -48,6 +54,8 @@ build_mac_arch() {
     --add-data "$APP_DIR/banana.py:$( [ "$APP_DIR" = "." ] && echo "." || echo "$APP_DIR" )"
     --hidden-import PIL
     --hidden-import requests
+    --hidden-import editor
+    --hidden-import pyside_app.editor
   )
   if [ -f "$ICON_PATH" ]; then
     PYI_ARGS+=(--icon "$ICON_PATH")
@@ -97,6 +105,9 @@ build_mac_universal() {
     --add-data "$APP_DIR/banana.py:$( [ "$APP_DIR" = "." ] && echo "." || echo "$APP_DIR" )"
     --hidden-import PIL
     --hidden-import requests
+    --hidden-import editor
+    --hidden-import pyside_app.editor
+    --exclude-module PIL._webp
   )
   if [ -f "$ICON_PATH" ]; then
     PYI_ARGS+=(--icon "$ICON_PATH")
