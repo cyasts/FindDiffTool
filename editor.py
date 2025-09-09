@@ -1079,11 +1079,11 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
         # visibility和label，初始化时也只在对应section显示label
         self._sync_item_visibility(diff)
         if diff.section == 'up':
-            item_up.set_label(diff.label, visible=True)
-            item_down.set_label(diff.label, visible=False)
+            item_up.circle_text.setVisible(self.toggle_labels.isChecked())
+            item_down.circle_text.setVisible(False)
         else:
-            item_up.set_label(diff.label, visible=False)
-            item_down.set_label(diff.label, visible=True)
+            item_up.circle_text.setVisible(False)
+            item_down.circle_text.setVisible(self.toggle_labels.isChecked())
 
         # style when disabled
         self._apply_enabled_style(diff)
@@ -1156,7 +1156,6 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
             for diff in diffs_to_update:
                 u = self.rect_items_up.get(diff.id)
                 d = self.rect_items_down.get(diff.id)
-                isUp = diff.section == 'up'
                 # --- 强制同步圆心 ---
                 if u:
                     u.setPos(diff.x, diff.y)
@@ -1164,12 +1163,16 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
                         u.setRect(QtCore.QRectF(0, 0, diff.width, diff.height))
                     u.update_handles()  # update_handles会用diff.cx/cy
                     u.set_label(diff.label, visible=(diff.section == 'up' and self.toggle_labels.isChecked()))
+                    if diff.section != 'up':
+                        u.set_label(diff.label, visible=False)
                 if d:
                     d.setPos(diff.x, diff.y)
                     if d.rect().width() != diff.width or d.rect().height() != diff.height:
                         d.setRect(QtCore.QRectF(0, 0, diff.width, diff.height))
                     d.update_handles()  # update_handles会用diff.cx/cy
                     d.set_label(diff.label, visible=(diff.section == 'down' and self.toggle_labels.isChecked()))
+                    if diff.section != 'down':
+                        d.set_label(diff.label, visible=False)
                 # --- END ---
                 self._update_radius_value_for_label(diff)
                 # 仅为发生变动的项设置需要重跑AI
