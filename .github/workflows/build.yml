@@ -24,6 +24,11 @@ jobs:
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
+      - name: Encrypt banana.py with pyarmor
+        run: |
+          pip install pyarmor
+          pyarmor gen -O encrypted banana.py
+          mv encrypted/banana.py banana.py
           python-version: "3.11"
 
       - name: Install Rosetta (for x86_64 fallback build)
