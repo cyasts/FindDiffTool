@@ -1,5 +1,6 @@
 import json
 import os
+import requests
 import shutil
 import time
 from dataclasses import dataclass, asdict
@@ -75,6 +76,77 @@ def overlap_ratio(a: QtCore.QRectF, b: QtCore.QRectF) -> float:
     min_area = max(1.0, min(a.width() * a.height(), b.width() * b.height()))
     return inter_area / min_area
 
+class ImageEditRequester:
+    def __init__(self, image_path: str, prompt: str):
+        self.image_path = image_path
+        self.prompt = prompt
+        self.BASE_URL = "https://ai.t8star.cn/"
+        # 建议在系统环境变量中设置 BANANA_API_KEY，避免把密钥写入代码库
+        self.API_KEY = "sk-RX5FUdtuNTfQvr3LAOsDsL7OdkJZxf7DIhQ73Gfqj7yq50ZO"
+        self.MODEL = os.environ.get("BANANA_MODEL", "nano-banana")
+        self.url = f"{self.BASE_URL}/v1/images/edits"
+        self.headers = {
+            'Authorization': f'Bearer {self.API_KEY}'
+        }
+
+    def send_request(self):
+        if not self.API_KEY:
+            raise RuntimeError("缺少 BANANA_API_KEY 环境变量，无法调用AI接口")
+        import base64
+        from PIL import Image
+
+        # 记录原始图片尺寸
+        with Image.open(self.image_path) as img:
+            width, height = img.size
+
+        files = [
+            ('image', (self.image_path, open(self.image_path, 'rb'), 'image/png')),
+        ]
+        payload = {
+            'model': self.MODEL,
+            'prompt': self.prompt,
+            'response_format': 'b64_json',
+            'size': f"{width}x{height}",
+        }
+        response = requests.request("POST", self.url, headers=self.headers, data=payload, files=files)
+
+        try:
+            resp_json = response.json()
+        except Exception:
+            raise RuntimeError(f"AI返回非JSON: {response.text[:200]}")
+
+        if 'data' not in resp_json or not resp_json['data']:
+            raise RuntimeError("AI返回数据为空")
+
+        data0 = resp_json['data'][0]
+        b64img = data0.get('b64_json')
+        out_path = self.image_path.replace('.png', '_result.png')
+        if b64img:
+            # 兼容 data url 前缀
+            if b64img.startswith('data:image'):
+                b64img = b64img.split(',', 1)[-1]
+            b64img = ''.join(b64img.split())
+            # 修复base64 padding
+            missing_padding = len(b64img) % 4
+            if missing_padding:
+                b64img += '=' * (4 - missing_padding)
+            img_bytes = base64.b64decode(b64img)
+            with open(out_path, 'wb') as f:
+                f.write(img_bytes)
+        elif 'url' in data0:
+            img_url = data0['url']
+            img_resp = requests.get(img_url)
+            img_resp.raise_for_status()
+            with open(out_path, 'wb') as f:
+                f.write(img_resp.content)
+        else:
+            raise RuntimeError("AI未返回b64或url")
+
+        # 保证输出尺寸一致
+        with Image.open(out_path) as out_img:
+            if out_img.size != (width, height):
+                out_img = out_img.resize((width, height), Image.LANCZOS)
+                out_img.save(out_path)
 
 class HandleItem(QtWidgets.QGraphicsEllipseItem):
     def __init__(self, size: float = 12.0, owner: Optional['DifferenceRectItem'] = None, index: int = 0):
@@ -1704,105 +1776,6 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
         self._ai_thread.finished.connect(self._ai_thread.deleteLater)
         self._ai_thread.start()
 
-    def _run_ai_on_crops(self, target_indices: Optional[List[int]] = None) -> list:
-        level_dir = self.level_dir()
-        ai_dir = level_dir  # 直接输出到目录中
-
-        # import banana requester
-        ImageEditRequester = None
-        try:
-            from pyside_app.banana import ImageEditRequester  # type: ignore
-        except Exception:
-            try:
-                import sys
-                alt_dir = os.path.dirname(__file__)
-                if os.path.isdir(alt_dir) and alt_dir not in sys.path:
-                    sys.path.append(alt_dir)
-                from banana import ImageEditRequester  # type: ignore
-            except Exception:
-                # 绝对路径加载
-                import importlib.util
-                abs_path = os.path.join(os.path.dirname(__file__), 'banana.py')
-                if not os.path.isfile(abs_path):
-                    raise RuntimeError('未找到 banana.py，请将其放入 pyside_app/ 目录或将其加入Python路径')
-                spec = importlib.util.spec_from_file_location('banana', abs_path)
-                if spec and spec.loader:
-                    mod = importlib.util.module_from_spec(spec)
-                    spec.loader.exec_module(mod)  # type: ignore
-                    ImageEditRequester = getattr(mod, 'ImageEditRequester', None)
-                if ImageEditRequester is None:
-                    raise RuntimeError('未找到 banana.py，请将其放入 pyside_app/ 目录或将其加入Python路径')
-
-        import shutil, time
-        # 准备origin
-        origin = None
-        for ext in ['.png', '.jpg', '.jpeg', '.bmp', '.gif']:
-            p = os.path.join(level_dir, f'origin{ext}')
-            if os.path.isfile(p):
-                origin = p
-                break
-        if origin is None:
-            origin = self.pair.up_image_path
-        img = QtGui.QImage(origin)
-        if img.isNull():
-            raise RuntimeError('无法打开 origin 图像')
-
-        total = len(target_indices) if target_indices else len(self.differences)
-        progress = QtWidgets.QProgressDialog("正在上传AI处理...", None, 0, max(1, total), self)
-        progress.setWindowModality(QtCore.Qt.ApplicationModal)
-        progress.setMinimumDuration(0)
-        progress.setLabelText(f"正在上传AI处理第1/{total}张图片...")
-        progress.show()
-        QtWidgets.QApplication.processEvents()
-        progress.setValue(0)
-        failed_indices: list = []
-        to_iter = list(range(1, len(self.differences) + 1)) if not target_indices else target_indices
-        step = 0
-        for idx in to_iter:
-            d = self.differences[idx - 1]
-            # prompt 来自对应茬点的 label
-            label_text = (d.label or '').strip()
-            try:
-                # 临时裁剪到文件
-                rect = self._ai_crop_rect_px(d)
-                if rect.isEmpty():
-                    failed_indices.append(idx)
-                    continue
-                tmp_path = os.path.join(level_dir, f'__tmp_region{idx}.png')
-                img.copy(rect).save(tmp_path)
-                req = ImageEditRequester(tmp_path, label_text, thread_num=1)
-                progress.setLabelText(f"正在上传AI处理第{step+1}/{total}张图片...")
-                # 同步执行一次
-                req.send_request()
-                # 期待输出文件名 *_result.png
-                out_path = tmp_path.replace('.png', '_result.png')
-                # 等待片刻确保文件写入
-                for _ in range(10):
-                    if os.path.isfile(out_path):
-                        break
-                    time.sleep(0.2)
-                if os.path.isfile(out_path):
-                    # 目标名：与regionN对应
-                    dst = os.path.join(ai_dir, f'region{idx}.png')
-                    shutil.move(out_path, dst)
-                else:
-                    failed_indices.append(idx)
-            except Exception:
-                failed_indices.append(idx)
-            finally:
-                try:
-                    if os.path.isfile(tmp_path):
-                        os.remove(tmp_path)
-                except Exception:
-                    pass
-            step += 1
-            
-            if step < total:
-                progress.setLabelText(f"正在上传AI处理第{step+1}/{total}张图片...")
-            progress.setValue(step)
-            QtWidgets.QApplication.processEvents()
-        return failed_indices
-
     def _write_meta_status(self, status: str, extra: dict | None = None, persist: bool = False) -> None:
         self.meta_status = status
         # merge or write meta.json
@@ -1831,16 +1804,6 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
             except Exception:
                 pass
         self._update_status_bar(status)
-
-    def on_load_clicked(self) -> None:
-        # try default directory; if missing, open dir dialog in config_dir
-        default_dir = self.level_dir()
-        if os.path.isdir(default_dir):
-            self._load_from_dir(default_dir)
-            return
-        path = QtWidgets.QFileDialog.getExistingDirectory(self, "选择配置目录", self.config_dir or "")
-        if path:
-            self._load_from_dir(path)
 
     def save_config(self, show_message: bool = True) -> None:
         # natural size = scene size
@@ -2247,30 +2210,6 @@ class AIWorker(QtCore.QObject):
     @QtCore.Slot()
     def run(self) -> None:
         try:
-            # import banana requester (same robust strategy)
-            ImageEditRequester = None
-            try:
-                from pyside_app.banana import ImageEditRequester  # type: ignore
-            except Exception:
-                try:
-                    import sys
-                    alt_dir = os.path.dirname(__file__)
-                    if os.path.isdir(alt_dir) and alt_dir not in sys.path:
-                        sys.path.append(alt_dir)
-                    from banana import ImageEditRequester  # type: ignore
-                except Exception:
-                    import importlib.util
-                    abs_path = os.path.join(os.path.dirname(__file__), 'banana.py')
-                    if not os.path.isfile(abs_path):
-                        raise RuntimeError('未找到 banana.py，请将其放入 pyside_app/ 目录或将其加入Python路径')
-                    spec = importlib.util.spec_from_file_location('banana', abs_path)
-                    if spec and spec.loader:
-                        mod = importlib.util.module_from_spec(spec)
-                        spec.loader.exec_module(mod)  # type: ignore
-                        ImageEditRequester = getattr(mod, 'ImageEditRequester', None)
-                    if ImageEditRequester is None:
-                        raise RuntimeError('未找到 banana.py，请将其放入 pyside_app/ 目录或将其加入Python路径')
-
             img = QtGui.QImage(self.origin_path)
             if img.isNull():
                 raise RuntimeError('无法打开 origin 图像')
