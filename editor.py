@@ -1076,17 +1076,14 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
         self.rect_items_up[diff.id] = item_up
         self.rect_items_down[diff.id] = item_down
 
-        # visibility和label，初始化时也只在对应section显示label
-        self._sync_item_visibility(diff)
+        # style when disabled
+        self._apply_enabled_style(diff)
         if diff.section == 'up':
             item_up.circle_text.setVisible(self.toggle_labels.isChecked())
             item_down.circle_text.setVisible(False)
         else:
             item_up.circle_text.setVisible(False)
             item_down.circle_text.setVisible(self.toggle_labels.isChecked())
-
-        # style when disabled
-        self._apply_enabled_style(diff)
 
         # no Qt signals; callbacks are triggered in itemChange/mouseMoveEvent
 
