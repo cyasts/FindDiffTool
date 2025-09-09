@@ -13,6 +13,7 @@ try:
 except Exception:  # pragma: no cover
     shiboken6 = None
 
+ENABLE_MOUSE : bool = True
 
 CATEGORY_COLOR_MAP: Dict[str, QtGui.QColor] = {
     '情感': QtGui.QColor('#ff7f50'),
@@ -83,15 +84,13 @@ class ImageEditRequester:
         self.BASE_URL = "https://ai.t8star.cn/"
         # 建议在系统环境变量中设置 BANANA_API_KEY，避免把密钥写入代码库
         self.API_KEY = "sk-RX5FUdtuNTfQvr3LAOsDsL7OdkJZxf7DIhQ73Gfqj7yq50ZO"
-        self.MODEL = os.environ.get("BANANA_MODEL", "nano-banana")
+        self.MODEL = "nano-banana"
         self.url = f"{self.BASE_URL}/v1/images/edits"
         self.headers = {
             'Authorization': f'Bearer {self.API_KEY}'
         }
 
     def send_request(self):
-        if not self.API_KEY:
-            raise RuntimeError("缺少 BANANA_API_KEY 环境变量，无法调用AI接口")
         import base64
         from PIL import Image
 
@@ -167,6 +166,11 @@ class HandleItem(QtWidgets.QGraphicsEllipseItem):
         self.setZValue(10)
 
     def mouseMoveEvent(self, event: 'QtWidgets.QGraphicsSceneMouseEvent') -> None:
+        global ENABLE_MOUSE
+        if not ENABLE_MOUSE :
+            event.accept()
+            return
+        
         super().mouseMoveEvent(event)
         if self.owner is not None:
             try:
@@ -177,6 +181,10 @@ class HandleItem(QtWidgets.QGraphicsEllipseItem):
                 pass
 
     def mousePressEvent(self, event: 'QtWidgets.QGraphicsSceneMouseEvent') -> None:
+        global ENABLE_MOUSE
+        if not ENABLE_MOUSE :
+            event.accept()
+            return
         # For handle drag,不要更改选择状态，避免触发选中后的移动/缩放逻辑
         super().mousePressEvent(event)
 
@@ -191,15 +199,27 @@ class CircleItem(QtWidgets.QGraphicsEllipseItem):
         self.setAcceptHoverEvents(True)
 
     def hoverEnterEvent(self, event: 'QtWidgets.QGraphicsSceneHoverEvent') -> None:
+        global ENABLE_MOUSE
+        if not ENABLE_MOUSE :
+            event.accept()
+            return
         # 禁用圆的 hover 高亮，仅设置光标
         self.setCursor(QtCore.Qt.OpenHandCursor)
         super().hoverEnterEvent(event)
 
     def hoverLeaveEvent(self, event: 'QtWidgets.QGraphicsSceneHoverEvent') -> None:
+        global ENABLE_MOUSE
+        if not ENABLE_MOUSE :
+            event.accept()
+            return
         # 禁用圆的 hover 高亮恢复
         super().hoverLeaveEvent(event)
 
     def hoverMoveEvent(self, event: 'QtWidgets.QGraphicsSceneHoverEvent') -> None:
+        global ENABLE_MOUSE
+        if not ENABLE_MOUSE :
+            event.accept()
+            return
         # 在圆内移动，仅保持手形光标，不做其他处理
         self.setCursor(QtCore.Qt.OpenHandCursor)
         super().hoverMoveEvent(event)
@@ -413,6 +433,10 @@ class DifferenceRectItem(QtWidgets.QGraphicsRectItem):
         self.update_label_pos()
 
     def mousePressEvent(self, event: QtWidgets.QGraphicsSceneMouseEvent) -> None:
+        global ENABLE_MOUSE
+        if not ENABLE_MOUSE :
+            event.accept()
+            return
         pos = event.pos()
         r = self.rect()
         corners = [r.topLeft(), r.topRight(), r.bottomRight(), r.bottomLeft()]
@@ -474,6 +498,11 @@ class DifferenceRectItem(QtWidgets.QGraphicsRectItem):
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event: QtWidgets.QGraphicsSceneMouseEvent) -> None:
+        global ENABLE_MOUSE
+        if not ENABLE_MOUSE :
+            event.accept()
+            return
+
         if not self._dragging:
             return super().mouseMoveEvent(event)
         scene_rect = self.scene().sceneRect() if self.scene() else QtCore.QRectF(0, 0, 1e6, 1e6)
@@ -545,6 +574,10 @@ class DifferenceRectItem(QtWidgets.QGraphicsRectItem):
             return
 
     def mouseReleaseEvent(self, event: QtWidgets.QGraphicsSceneMouseEvent) -> None:
+        global ENABLE_MOUSE
+        if not ENABLE_MOUSE :
+            event.accept()
+            return
         self._dragging = False
         self._drag_mode = 'none'
         self._resize_index = -1
@@ -558,6 +591,10 @@ class DifferenceRectItem(QtWidgets.QGraphicsRectItem):
         return super().mouseReleaseEvent(event)
 
     def hoverMoveEvent(self, event: 'QtWidgets.QGraphicsSceneHoverEvent') -> None:
+        global ENABLE_MOUSE
+        if not ENABLE_MOUSE :
+            event.accept()
+            return
         # set cursors only when矩形区域可见；否则使用默认箭头，不改变笔刷（避免出现外框）
         r = self.rect()
         pos = event.pos()
@@ -585,6 +622,10 @@ class DifferenceRectItem(QtWidgets.QGraphicsRectItem):
         super().hoverMoveEvent(event)
 
     def hoverLeaveEvent(self, event: 'QtWidgets.QGraphicsSceneHoverEvent') -> None:
+        global ENABLE_MOUSE
+        if not ENABLE_MOUSE :
+            event.accept()
+            return
         # 仅当当前笔可见时才恢复细边框；否则保持 NoPen
         if self.pen().style() != QtCore.Qt.NoPen:
             self._hover_in_circle = False
@@ -627,6 +668,9 @@ class DifferenceRectItem(QtWidgets.QGraphicsRectItem):
         self.diff.height = r.height()
 
     def on_handle_moved(self, idx: int, p: QtCore.QPointF) -> None:
+        global ENABLE_MOUSE
+        if not ENABLE_MOUSE :
+            return
         # allow dragging outward: do not clamp p; normalize later
         r = QtCore.QRectF(self.rect())
         if idx == 0:  # tl
@@ -681,6 +725,10 @@ class DifferenceRectItem(QtWidgets.QGraphicsRectItem):
 
     def hoverEnterEvent(self, event: 'QtWidgets.QGraphicsSceneHoverEvent') -> None:
         # 禁用进入时的矩形高亮，仅设置光标
+        global ENABLE_MOUSE
+        if not ENABLE_MOUSE :
+            event.accept()
+            return
         if self.pen().style() != QtCore.Qt.NoPen:
             self.setCursor(QtCore.Qt.OpenHandCursor)
         super().hoverEnterEvent(event)
@@ -710,53 +758,20 @@ class ImageView(QtWidgets.QGraphicsView):
 class DifferenceEditorWindow(QtWidgets.QMainWindow):
     def _set_completed_ui_disabled(self, disabled: bool):
         # 禁用保存、AI处理按钮
-        self.btn_save.setDisabled(disabled)
-        self.btn_submit.setDisabled(disabled)
-        # 禁用茬点列表编辑和删除
-        for section in ('up', 'down'):
-            lw = self.current_list(section)
-            for i in range(lw.count()):
-                item = lw.item(i)
-                widget = lw.itemWidget(item)
-                if widget:
-                    # 禁用输入框
-                    edits = widget.findChildren(QtWidgets.QLineEdit)
-                    for edit in edits:
-                        edit.setReadOnly(disabled)
-                    # 禁用删除按钮
-                    btns = widget.findChildren(QtWidgets.QToolButton)
-                    for btn in btns:
-                        btn.setDisabled(disabled)
-        # 禁用rect和圆的拖动
-        for mapping in (self.rect_items_up, self.rect_items_down):
-            for item in mapping.values():
-                item.setFlag(QtWidgets.QGraphicsItem.ItemIsMovable, not disabled)
-                # 禁用圆的拖动（通过移除事件处理）
-                if hasattr(item, 'circle_item'):
-                    if disabled:
-                        # 移除 DifferenceRectItem 的 mousePressEvent/mouseMoveEvent/mouseReleaseEvent
-                        item._orig_mousePressEvent = getattr(item, 'mousePressEvent', None)
-                        item._orig_mouseMoveEvent = getattr(item, 'mouseMoveEvent', None)
-                        item._orig_mouseReleaseEvent = getattr(item, 'mouseReleaseEvent', None)
-                        def _noop(*args, **kwargs):
-                            pass
-                        item.mousePressEvent = _noop
-                        item.mouseMoveEvent = _noop
-                        item.mouseReleaseEvent = _noop
-                    else:
-                        # 恢复 DifferenceRectItem 的 mouse 事件
-                        if hasattr(item, '_orig_mousePressEvent') and item._orig_mousePressEvent:
-                            item.mousePressEvent = item._orig_mousePressEvent
-                        if hasattr(item, '_orig_mouseMoveEvent') and item._orig_mouseMoveEvent:
-                            item.mouseMoveEvent = item._orig_mouseMoveEvent
-                        if hasattr(item, '_orig_mouseReleaseEvent') and item._orig_mouseReleaseEvent:
-                            item.mouseReleaseEvent = item._orig_mouseReleaseEvent
+        global ENABLE_MOUSE
+        self.btn_save.setEnabled(not disabled)
+        self.btn_submit.setEnabled(not disabled)
+        self.up_side.setEnabled(not disabled)
+        self.down_side.setEnabled(not disabled)
+        ENABLE_MOUSE = not disabled
+
     def __init__(self, pair, config_dir: str, parent: Optional[QtWidgets.QWidget] = None) -> None:
         super().__init__(parent)
         self.pair = pair
         self.config_dir = config_dir
         self.setWindowTitle(f"不同点编辑器 - {self.pair.name}")
         self.resize(1200, 820)
+        self._add_btns = list()
 
         # load images
         up_pix = QtGui.QPixmap(self.pair.up_image_path)
@@ -795,8 +810,8 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
         up_left = QtWidgets.QVBoxLayout()
         up_left.addWidget(self.up_view, 1)
         up_row.addLayout(up_left, 1)
-        up_side = self._build_side_panel(section='up')
-        up_row.addWidget(up_side, 0)
+        self.up_side = self._build_side_panel(section='up')
+        up_row.addWidget(self.up_side, 0)
         vbox_root.addLayout(up_row, 1)
 
         # Down row
@@ -804,8 +819,8 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
         down_left = QtWidgets.QVBoxLayout()
         down_left.addWidget(self.down_view, 1)
         down_row.addLayout(down_left, 1)
-        down_side = self._build_side_panel(section='down')
-        down_row.addWidget(down_side, 0)
+        self.down_side = self._build_side_panel(section='down')
+        down_row.addWidget(self.down_side, 0)
         vbox_root.addLayout(down_row, 1)
 
         # Bottom toolbar
@@ -1232,16 +1247,12 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
                         u.setRect(QtCore.QRectF(0, 0, diff.width, diff.height))
                     u.update_handles()  # update_handles会用diff.cx/cy
                     u.set_label(diff.label, visible=(diff.section == 'up' and self.toggle_labels.isChecked()))
-                    if diff.section != 'up':
-                        u.set_label(diff.label, visible=False)
                 if d:
                     d.setPos(diff.x, diff.y)
                     if d.rect().width() != diff.width or d.rect().height() != diff.height:
                         d.setRect(QtCore.QRectF(0, 0, diff.width, diff.height))
                     d.update_handles()  # update_handles会用diff.cx/cy
                     d.set_label(diff.label, visible=(diff.section == 'down' and self.toggle_labels.isChecked()))
-                    if diff.section != 'down':
-                        d.set_label(diff.label, visible=False)
                 # --- END ---
                 self._update_radius_value_for_label(diff)
                 # 仅为发生变动的项设置需要重跑AI
@@ -1727,7 +1738,7 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
             return
         # Step 1: alidation
         # 限制茬点数量：仅当启用的茬点数为 15/20/25 时允许AI处理
-        allowed_counts = {1, 15, 20, 25}
+        allowed_counts = {15, 20, 25}
         enabled_count = sum(1 for d in self.differences if d.enabled)
         if enabled_count not in allowed_counts:
             QtWidgets.QMessageBox.information(
@@ -1829,9 +1840,8 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
             ]
             # compute hint circle from stored local center and radius
             # local center -> absolute
-            r_w, r_h = d.width, d.height
-            cx_local = d.cx if d.cx >= 0 else r_w / 2.0
-            cy_local = d.cy if d.cy >= 0 else r_h / 2.0
+            cx = to_percent_x(d.x + d.cx)
+            cy = to_percent_y_bottom(d.y + d.cy)
 
             lvl = d.hint_level
             # 从 hint level 获取半径（修正list越界问题）
@@ -1849,7 +1859,7 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
                 "enabled": bool(d.enabled),
                 "points": points,
                 "hintLevel": int(lvl),
-                "circleLocal": {"x": cx_local, "y": cy_local},
+                "circleLocal": {"x": cx, "y": cy},
                 "circleRadius": radius
             })
 
@@ -2027,6 +2037,10 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
             ys = [from_percent_y_bottom(p['y']) for p in points]
             min_x, max_x = min(xs), max(xs)
             min_y, max_y = min(ys), max(ys)
+            c_x = float(diff.get('circleLocal', {}).get('x', -1))
+            c_y = float(diff.get('circleLocal', {}).get('y', -1))
+            cpx = from_percent_x(c_x)
+            cpy = from_percent_y_bottom(c_y)
             d = Difference(
                 id=str(diff.get('id', now_id())),
                 name=str(diff.get('name', f"不同点 {len(self.differences) + 1}")),
@@ -2039,8 +2053,8 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
                 width=max(MIN_RECT_SIZE, max_x - min_x),
                 height=max(MIN_RECT_SIZE, max_y - min_y),
                 hint_level = int(diff.get('hintLevel', 0)),
-                cx=float(diff.get('circleLocal', {}).get('x', -1)),
-                cy=float(diff.get('circleLocal', {}).get('y', -1)),
+                cx=cpx,
+                cy=cpy,
             )
             self.differences.append(d)
             self._add_rect_items(d)
@@ -2248,12 +2262,12 @@ class AIWorker(QtCore.QObject):
                         pass
                 except Exception:
                     pass
-                # finally:
-                    # try:
-                    #     # if os.path.isfile(tmp_path):
-                    #     #     os.remove(tmp_path)
-                    # except Exception:
-                    #     pass
+                finally:
+                    try:
+                        if os.path.isfile(tmp_path):
+                            os.remove(tmp_path)
+                    except Exception:
+                        pass
                 step += 1
                 self.progressed.emit(step, total)
             # compute failures: region files not present
