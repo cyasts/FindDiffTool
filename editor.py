@@ -22,9 +22,9 @@ CATEGORY_COLOR_MAP: Dict[str, QtGui.QColor] = {
 }
 
 # Discrete hint-circle radius levels (in natural pixels)
-RADIUS_LEVELS: List[int] = [20 + i * 10 for i in range(10)]  # 20, 30, ..., 110
+RADIUS_LEVELS: List[int] = [53, 59, 65, 71, 76, 81, 85, 90, 95, 100, 105,110, 117, 124,129]
 # Min rectangle size (natural pixels)
-MIN_RECT_SIZE: float = 50.0
+MIN_RECT_SIZE: float = 110
 
 
 @dataclass
@@ -40,14 +40,10 @@ class Difference:
     y: float
     width: float
     height: float
-    # hint circle radius level: 0 = auto; 1..10 = fixed levels (20,30,...,110)
     # independent hint circles for up/down
-    hint_level_up: int = 0
-    circle_up_x: float = -1.0
-    circle_up_y: float = -1.0
-    hint_level_down: int = 0
-    circle_down_x: float = -1.0
-    circle_down_y: float = -1.0
+    hint_level: int = 0
+    cx: float = -1.0
+    cy: float = -1.0
 
 
 def now_id() -> str:
@@ -188,7 +184,7 @@ class DifferenceRectItem(QtWidgets.QGraphicsRectItem):
         self._item_start_pos = QtCore.QPointF(0, 0)
         self._anchor_scene = QtCore.QPointF(0, 0)
         self._suppress_sync = False
-        self._edge_index: str = ''  # 'L','R','T','B'
+        self._edge_index: str = ''  # 'L','R','T','B' 
         self._edge_thresh: float = 8.0
         # handles at corners: tl, tr, br, bl
         self.handles = [HandleItem(9.0, owner=self, index=i) for i in range(4)]
@@ -288,11 +284,16 @@ class DifferenceRectItem(QtWidgets.QGraphicsRectItem):
         self.circle_text.setVisible(True)
 
     def set_label(self, text: str, visible: bool) -> None:
+        if not visible:
+            self.circle_text.setVisible(False)
+            return
+        self.circle_text.setVisible(True)
         # 不在矩形内绘制，改为仅在圆内绘制并立即刷新
         self.label_item.setVisible(False)
         cr = self.circle_item.rect()
         cx, cy = cr.center().x(), cr.center().y()
         radius = cr.width() / 2.0
+        
         self._layout_circle_text(cx, cy, radius)
 
     def update_label_pos(self) -> None:
@@ -315,39 +316,25 @@ class DifferenceRectItem(QtWidgets.QGraphicsRectItem):
         size = min(max(1.0, r.width()), max(1.0, r.height()))
         max_half = size / 2.0
         # auto: pick largest discrete radius that fits; fallback to max_half when too small
-        allowed = [lvl for lvl in RADIUS_LEVELS if lvl <= max_half]
+        allowed = [lvl for lvl in RADIUS_LEVELS if lvl <= max_half-10]
         is_up = True  # this item draws both views; choose fields based on section when used
         # choose state fields per section by checking owner context via label (section not stored on item)
         # Infer by default using diff.section for label text placement
-        fields_prefix = 'up' if self.is_up else 'down'
         if allowed:
             radius = float(allowed[-1])
-            if fields_prefix == 'up':
-                self.diff.hint_level_up = len(allowed)
-            else:
-                self.diff.hint_level_down = len(allowed)
+            self.diff.hint_level = len(allowed)
         else:
             radius = max_half
-            if fields_prefix == 'up':
-                self.diff.hint_level_up = 0
-            else:
-                self.diff.hint_level_down = 0
+            self.diff.hint_level = 1
 
         # center: use stored local center if any, else rect center; clamp into rect with current radius
-        if fields_prefix == 'up':
-            cx = self.diff.circle_up_x if self.diff.circle_up_x >= 0 else r.width() / 2.0
-            cy = self.diff.circle_up_y if self.diff.circle_up_y >= 0 else r.height() / 2.0
-        else:
-            cx = self.diff.circle_down_x if self.diff.circle_down_x >= 0 else r.width() / 2.0
-            cy = self.diff.circle_down_y if self.diff.circle_down_y >= 0 else r.height() / 2.0
+
+        cx = self.diff.cx if self.diff.cx >= 0 else r.width() / 2.0
+        cy = self.diff.cy if self.diff.cy >= 0 else r.height() / 2.0
         cx = max(radius, min(cx, r.width() - radius))
         cy = max(radius, min(cy, r.height() - radius))
-        if fields_prefix == 'up':
-            self.diff.circle_up_x = cx
-            self.diff.circle_up_y = cy
-        else:
-            self.diff.circle_down_x = cx
-            self.diff.circle_down_y = cy
+        self.diff.cx = cx
+        self.diff.cy = cy
         self.circle_item.setRect(cx - radius, cy - radius, radius * 2.0, radius * 2.0)
         # update label
         self._layout_circle_text(cx, cy, radius)
@@ -476,12 +463,8 @@ class DifferenceRectItem(QtWidgets.QGraphicsRectItem):
             local = event.pos()
             cx = max(radius, min(local.x(), r.width() - radius))
             cy = max(radius, min(local.y(), r.height() - radius))
-            if self.is_up:
-                self.diff.circle_up_x = cx
-                self.diff.circle_up_y = cy
-            else:
-                self.diff.circle_down_x = cx
-                self.diff.circle_down_y = cy
+            self.diff.cx = cx
+            self.diff.cy = cy
             self.circle_item.setRect(cx - radius, cy - radius, radius * 2.0, radius * 2.0)
             # move label with circle
             self._layout_circle_text(cx, cy, radius)
@@ -653,6 +636,49 @@ class ImageView(QtWidgets.QGraphicsView):
 
 
 class DifferenceEditorWindow(QtWidgets.QMainWindow):
+    def _set_completed_ui_disabled(self, disabled: bool):
+        # 禁用保存、AI处理按钮
+        self.btn_save.setDisabled(disabled)
+        self.btn_submit.setDisabled(disabled)
+        # 禁用茬点列表编辑和删除
+        for section in ('up', 'down'):
+            lw = self.current_list(section)
+            for i in range(lw.count()):
+                item = lw.item(i)
+                widget = lw.itemWidget(item)
+                if widget:
+                    # 禁用输入框
+                    edits = widget.findChildren(QtWidgets.QLineEdit)
+                    for edit in edits:
+                        edit.setReadOnly(disabled)
+                    # 禁用删除按钮
+                    btns = widget.findChildren(QtWidgets.QToolButton)
+                    for btn in btns:
+                        btn.setDisabled(disabled)
+        # 禁用rect和圆的拖动
+        for mapping in (self.rect_items_up, self.rect_items_down):
+            for item in mapping.values():
+                item.setFlag(QtWidgets.QGraphicsItem.ItemIsMovable, not disabled)
+                # 禁用圆的拖动（通过移除事件处理）
+                if hasattr(item, 'circle_item'):
+                    if disabled:
+                        # 移除 DifferenceRectItem 的 mousePressEvent/mouseMoveEvent/mouseReleaseEvent
+                        item._orig_mousePressEvent = getattr(item, 'mousePressEvent', None)
+                        item._orig_mouseMoveEvent = getattr(item, 'mouseMoveEvent', None)
+                        item._orig_mouseReleaseEvent = getattr(item, 'mouseReleaseEvent', None)
+                        def _noop(*args, **kwargs):
+                            pass
+                        item.mousePressEvent = _noop
+                        item.mouseMoveEvent = _noop
+                        item.mouseReleaseEvent = _noop
+                    else:
+                        # 恢复 DifferenceRectItem 的 mouse 事件
+                        if hasattr(item, '_orig_mousePressEvent') and item._orig_mousePressEvent:
+                            item.mousePressEvent = item._orig_mousePressEvent
+                        if hasattr(item, '_orig_mouseMoveEvent') and item._orig_mouseMoveEvent:
+                            item.mouseMoveEvent = item._orig_mouseMoveEvent
+                        if hasattr(item, '_orig_mouseReleaseEvent') and item._orig_mouseReleaseEvent:
+                            item.mouseReleaseEvent = item._orig_mouseReleaseEvent
     def __init__(self, pair, config_dir: str, parent: Optional[QtWidgets.QWidget] = None) -> None:
         super().__init__(parent)
         self.pair = pair
@@ -814,6 +840,9 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
         # initial status bar display
         self._update_status_bar()
         self._update_window_title()
+        # 若初始状态为完成，禁用交互
+        if getattr(self, 'meta_status', None) == 'completed':
+            self._set_completed_ui_disabled(True)
 
         # Shortcut: Cmd/Ctrl+S 保存
         self._sc_save = QtGui.QShortcut(QtGui.QKeySequence.Save, self)
@@ -842,6 +871,9 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
             pass
         if hasattr(self, 'status_bar') and self.status_bar is not None:
             self.status_bar.showMessage(f"状态：{human}")
+
+        # 状态为完成时禁用相关交互，否则恢复
+        self._set_completed_ui_disabled(self.meta_status == 'completed')
 
     # --- AI status bar progress helpers ---
     def _ai_progress_start(self, total: int) -> None:
@@ -1044,10 +1076,14 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
         self.rect_items_up[diff.id] = item_up
         self.rect_items_down[diff.id] = item_down
 
-        # visibility and label
+        # visibility和label，初始化时也只在对应section显示label
         self._sync_item_visibility(diff)
-        item_up.set_label(diff.label, visible=(diff.section == 'up'))
-        item_down.set_label(diff.label, visible=(diff.section == 'down'))
+        if diff.section == 'up':
+            item_up.set_label(diff.label, visible=True)
+            item_down.set_label(diff.label, visible=False)
+        else:
+            item_up.set_label(diff.label, visible=False)
+            item_down.set_label(diff.label, visible=True)
 
         # style when disabled
         self._apply_enabled_style(diff)
@@ -1076,9 +1112,8 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
             pen = QtGui.QPen(QtGui.QColor('#ff0000'))
             pen.setWidth(2)
             item.setPen(pen)
-            # 根据是否被选中设置不同透明度
-            alpha = 70 if getattr(self, '_selected_diff_id', None) == item.diff.id else 40
-            item.setBrush(QtGui.QBrush(QtGui.QColor(255, 0, 0, alpha)))
+            # 统一填充透明度，不随选中状态改变
+            item.setBrush(QtGui.QBrush(QtGui.QColor(255, 0, 0, 40)))
         else:
             item.setPen(QtGui.QPen(QtCore.Qt.NoPen))
             item.setBrush(QtGui.QBrush(QtCore.Qt.transparent))
@@ -1121,19 +1156,21 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
             for diff in diffs_to_update:
                 u = self.rect_items_up.get(diff.id)
                 d = self.rect_items_down.get(diff.id)
+                isUp = diff.section == 'up'
+                # --- 强制同步圆心 ---
                 if u:
-                    # position controls top-left, rect holds width/height
                     u.setPos(diff.x, diff.y)
                     if u.rect().width() != diff.width or u.rect().height() != diff.height:
                         u.setRect(QtCore.QRectF(0, 0, diff.width, diff.height))
-                        u.update_handles()
+                    u.update_handles()  # update_handles会用diff.cx/cy
                     u.set_label(diff.label, visible=(diff.section == 'up' and self.toggle_labels.isChecked()))
                 if d:
                     d.setPos(diff.x, diff.y)
                     if d.rect().width() != diff.width or d.rect().height() != diff.height:
                         d.setRect(QtCore.QRectF(0, 0, diff.width, diff.height))
-                        d.update_handles()
+                    d.update_handles()  # update_handles会用diff.cx/cy
                     d.set_label(diff.label, visible=(diff.section == 'down' and self.toggle_labels.isChecked()))
+                # --- END ---
                 self._update_radius_value_for_label(diff)
                 # 仅为发生变动的项设置需要重跑AI
                 if changed_id is None or diff.id == changed_id:
@@ -1239,7 +1276,7 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
         # show actual radius px (use 'up' fields for展示)
         size_min = max(1.0, min(diff.width, diff.height))
         half = size_min / 2.0
-        lvl = diff.hint_level_up
+        lvl = diff.hint_level
         if 1 <= lvl <= len(RADIUS_LEVELS):
             radius_px = min(float(RADIUS_LEVELS[lvl - 1]), half)
         else:
@@ -1303,15 +1340,25 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
         self._apply_selected_opacity()
 
     def _apply_selected_opacity(self) -> None:
+        # 使用填充颜色突出选中项：选中为蓝色填充，其余为红色填充；透明度固定
         selected_id = getattr(self, '_selected_diff_id', None)
         for mapping in (self.rect_items_up, self.rect_items_down):
             for did, item in mapping.items():
-                brush = QtGui.QBrush(item.brush())
-                color = brush.color()
-                alpha = 70 if selected_id is not None and did == selected_id else 40
-                color.setAlpha(alpha)
-                brush.setColor(color)
-                item.setBrush(brush)
+                try:
+                    # 隐藏时不修改以免意外显现
+                    if item.pen().style() == QtCore.Qt.NoPen:
+                        continue
+                    fill = QtGui.QColor('#0d6efd') if (selected_id is not None and did == selected_id) else QtGui.QColor('#ff0000')
+                    fill.setAlpha(40)
+                    item.setBrush(QtGui.QBrush(fill))
+                    # 保持描边为红色
+                    pen = item.pen()
+                    if pen.style() != QtCore.Qt.NoPen:
+                        pen.setColor(QtGui.QColor('#ff0000'))
+                        pen.setWidth(2)
+                        item.setPen(pen)
+                except Exception:
+                    pass
 
     def delete_selected(self, section: str) -> None:
         lw = self.current_list(section)
@@ -1433,6 +1480,21 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
         self.ai_overlays_up.clear()
         self.ai_overlays_down.clear()
 
+    def _scale_center_ai_overlay(self, pm: QtGui.QPixmap, w: int, h: int) -> tuple[QtGui.QPixmap, float, float]:
+        """按比例缩放并计算把缩放后图像居中贴入 w*h 框的 dx/dy 偏移。"""
+        try:
+            # 规一 HiDPI，避免 DPR 导致的1px偏差
+            if pm.devicePixelRatio() != 1:
+                img = pm.toImage()
+                img.setDevicePixelRatio(1.0)
+                pm = QtGui.QPixmap.fromImage(img)
+        except Exception:
+            pass
+        scaled = pm.scaled(w, h, QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation)
+        dx = (w - scaled.width()) * 0.5
+        dy = (h - scaled.height()) * 0.5
+        return scaled, dx, dy
+
     def refresh_ai_overlays(self) -> None:
         # rebuild overlays from disk according to current differences order
         self._remove_ai_overlays()
@@ -1445,40 +1507,56 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
             pm = QtGui.QPixmap(path)
             if pm.isNull():
                 continue
-            w = max(1, int(round(d.width)))
-            h = max(1, int(round(d.height)))
-            pm_scaled = pm.scaled(w, h, QtCore.Qt.IgnoreAspectRatio, QtCore.Qt.SmoothTransformation)
+            pm.setDevicePixelRatio(1.0)  # 避免结果图自带 DPR 干扰
+            rect = self._ai_crop_rect_px(d)
+            scaled = pm.scaled(rect.width(), rect.height(),
+                   QtCore.Qt.KeepAspectRatio,
+                   QtCore.Qt.SmoothTransformation)
+
+            item = QtWidgets.QGraphicsPixmapItem(scaled)
+            # ——用中心锚点，彻底规避奇偶像素误差——
+            item.setOffset(-scaled.width() / 2.0, -scaled.height() / 2.0)
+            item.setPos(rect.center().x(), rect.center().y())
+            item.setZValue(0.5)
+
             if d.section == 'up':
-                item_up = QtWidgets.QGraphicsPixmapItem(pm_scaled)
-                item_up.setPos(d.x, d.y)
-                item_up.setZValue(0.5)
-                self.up_scene.addItem(item_up)
-                self.ai_overlays_up[d.id] = item_up
+                self.up_scene.addItem(item)
+                self.ai_overlays_up[d.id] = item
             else:
-                item_dn = QtWidgets.QGraphicsPixmapItem(pm_scaled)
-                item_dn.setPos(d.x, d.y)
-                item_dn.setZValue(0.5)
-                self.down_scene.addItem(item_dn)
-                self.ai_overlays_down[d.id] = item_dn
+                self.down_scene.addItem(item)
+                self.ai_overlays_down[d.id] = item
+
+    def _ai_crop_rect_px(self, d: Difference) -> QtCore.QRect:
+        # 用整数真实像素，并限制在对应场景边界
+        x = max(0, int(round(d.x)))
+        y = max(0, int(round(d.y)))
+        w = max(1, int(round(d.width)))
+        h = max(1, int(round(d.height)))
+        scene = self.up_scene if d.section == 'up' else self.down_scene
+        bounds = QtCore.QRect(0, 0, int(scene.width()), int(scene.height()))
+        return QtCore.QRect(x, y, w, h).intersected(bounds)
 
     def _update_ai_overlay_geometry(self) -> None:
         if not self.toggle_ai_preview.isChecked():
             return
-        for idx, d in enumerate(self.differences, start=1):
-            w = max(1, int(round(d.width)))
-            h = max(1, int(round(d.height)))
-            if d.section == 'up':
-                mapping = self.ai_overlays_up
-            else:
-                mapping = self.ai_overlays_down
-            item = mapping.get(d.id)
+        for d in self.differences:
+            item = (self.ai_overlays_up if d.section == 'up' else self.ai_overlays_down).get(d.id)
             if not item:
                 continue
             try:
-                item.setPos(d.x, d.y)
+                rect = self._ai_crop_rect_px(d)
+                # 重新对齐中心
+                item.setPos(rect.center().x(), rect.center().y())
                 cur = item.pixmap()
-                if not cur.isNull() and (cur.width() != w or cur.height() != h):
-                    item.setPixmap(cur.scaled(w, h, QtCore.Qt.IgnoreAspectRatio, QtCore.Qt.SmoothTransformation))
+                if not cur.isNull() and (cur.width() != rect.width() or cur.height() != rect.height()):
+                    scaled = cur.scaled(rect.width(), rect.height(),
+                                        QtCore.Qt.KeepAspectRatio,
+                                        QtCore.Qt.SmoothTransformation)
+                    item.setPixmap(scaled)
+                    item.setOffset(-scaled.width() / 2.0, -scaled.height() / 2.0)
+                else:
+                    # 保证中心锚点存在
+                    item.setOffset(-cur.width() / 2.0, -cur.height() / 2.0)
             except Exception:
                 pass
 
@@ -1515,14 +1593,9 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
         circles = []
         for d in self.differences:
             r_w, r_h = d.width, d.height
-            if d.section == 'up':
-                cx_local = d.circle_up_x if d.circle_up_x >= 0 else r_w / 2.0
-                cy_local = d.circle_up_y if d.circle_up_y >= 0 else r_h / 2.0
-                lvl = d.hint_level_up
-            else:
-                cx_local = d.circle_down_x if d.circle_down_x >= 0 else r_w / 2.0
-                cy_local = d.circle_down_y if d.circle_down_y >= 0 else r_h / 2.0
-                lvl = d.hint_level_down
+            cx_local = d.cx if d.cx >= 0 else r_w / 2.0
+            cy_local = d.cy if d.cy >= 0 else r_h / 2.0
+            lvl = d.hint_level
             if 1 <= lvl <= len(RADIUS_LEVELS):
                 radius_px = float(RADIUS_LEVELS[lvl - 1])
             else:
@@ -1564,13 +1637,6 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
 
         return True, None
 
-    def on_submit(self) -> None:
-        ok, msg = self.validate_before_save()
-        if not ok:
-            QtWidgets.QMessageBox.warning(self, "校验失败", msg or "校验失败")
-            return
-        self.save_config(show_message=False)
-
     def on_save_clicked(self) -> None:
         # Save now also performs pre-save validation
         ok, msg = self.validate_before_save()
@@ -1587,24 +1653,23 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
         if getattr(self, '_is_dirty', False) or self.meta_status == 'unsaved':
             QtWidgets.QMessageBox.information(self, "提示", "当前修改尚未保存，请先保存后再进行AI处理。")
             return
-        # Step 1: ensure save/validation
-        ok, msg = self.validate_before_save()
-        if not ok:
-            QtWidgets.QMessageBox.warning(self, "校验失败", msg or "校验失败")
+        # Step 1: alidation
+        # 限制茬点数量：仅当启用的茬点数为 15/20/25 时允许AI处理
+        allowed_counts = {1, 15, 20, 25}
+        enabled_count = sum(1 for d in self.differences if d.enabled)
+        if enabled_count not in allowed_counts:
+            QtWidgets.QMessageBox.information(
+                self,
+                "AI处理",
+                f"当前启用的茬点数为 {enabled_count}，AI处理仅支持 15、20 或 25 个，请调整后重试。"
+            )
             return
-        self.save_config(False)
+
         # Step 2: 从 meta.json 中读取待处理索引（若存在），否则根据 needAI 计算
         targets: List[int] = []
-        try:
-            with open(self.meta_json_path(), 'r', encoding='utf-8') as f:
-                meta_tmp = json.load(f)
-                targets = list(map(int, meta_tmp.get('pendingIndices', [])))
-        except Exception:
-            targets = []
-        if not targets:
-            for idx, d in enumerate(self.differences, start=1):
-                if self.need_ai_by_id.get(d.id, True):
-                    targets.append(idx)
+        for idx, d in enumerate(self.differences, start=1):
+            if self.need_ai_by_id.get(d.id, True):
+                targets.append(idx)
         if not targets:
             QtWidgets.QMessageBox.information(self, "AI处理", "无需处理，所有茬点均为最新。")
             return
@@ -1699,11 +1764,7 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
             label_text = (d.label or '').strip()
             try:
                 # 临时裁剪到文件
-                x = max(0, int(round(d.x)))
-                y = max(0, int(round(d.y)))
-                w = max(1, int(round(d.width)))
-                h = max(1, int(round(d.height)))
-                rect = QtCore.QRect(x, y, w, h).intersected(img.rect())
+                rect = self._ai_crop_rect_px(d)
                 if rect.isEmpty():
                     failed_indices.append(idx)
                     continue
@@ -1750,18 +1811,11 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
         need_ai_list = []
         for d in self.differences:
             need_ai_list.append(bool(self.need_ai_by_id.get(d.id, True)))
-        # compute pendingIndices (changed/new indices)
-        pending: List[int] = []
-        if status == 'aiPending':
-            for idx, d in enumerate(self.differences, start=1):
-                if self.need_ai_by_id.get(d.id, True):
-                    pending.append(idx)
         meta = {
             "imageName": os.path.basename(self.pair.up_image_path),
             "imageSize": [int(self.up_scene.width()), int(self.up_scene.height())],
             "status": status,
-            "needAI": need_ai_list,
-            "pendingIndices": pending
+            "needAI": need_ai_list
         }
         if extra:
             try:
@@ -1813,19 +1867,15 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
             # compute hint circle from stored local center and radius
             # local center -> absolute
             r_w, r_h = d.width, d.height
-            if d.section == 'up':
-                cx_local = d.circle_up_x if d.circle_up_x >= 0 else r_w / 2.0
-                cy_local = d.circle_up_y if d.circle_up_y >= 0 else r_h / 2.0
-                lvl = d.hint_level_up
+            cx_local = d.cx if d.cx >= 0 else r_w / 2.0
+            cy_local = d.cy if d.cy >= 0 else r_h / 2.0
+
+            lvl = d.hint_level
+            # 从 hint level 获取半径（修正list越界问题）
+            if isinstance(lvl, int) and 1 <= lvl <= len(RADIUS_LEVELS):
+                radius = RADIUS_LEVELS[lvl - 1]
             else:
-                cx_local = d.circle_down_x if d.circle_down_x >= 0 else r_w / 2.0
-                cy_local = d.circle_down_y if d.circle_down_y >= 0 else r_h / 2.0
-                lvl = d.hint_level_down
-            # radius from level (auto时使用已计算的level对应半径或内切)
-            if lvl > 0 and lvl <= len(RADIUS_LEVELS):
-                radius_px = float(RADIUS_LEVELS[lvl - 1])
-            else:
-                radius_px = min(r_w, r_h) / 2.0
+                radius = 0
 
             data["differences"].append({
                 "id": d.id,
@@ -1835,16 +1885,9 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
                 "label": d.label or "",
                 "enabled": bool(d.enabled),
                 "points": points,
-                # hintCircle kept for compatibility plus extended fields
-                "hintCircle": {
-                    "x": to_percent_x(d.x + cx_local),
-                    "y": to_percent_y_bottom(d.y + cy_local),
-                    "radius": radius_px / 20.0,
-                    "isDragged": False,
-                    "visible": True
-                },
                 "hintLevel": int(lvl),
-                "circleLocal": {"x": cx_local, "y": cy_local}
+                "circleLocal": {"x": cx_local, "y": cy_local},
+                "circleRadius": radius
             })
 
         # ensure directory structure
@@ -1932,18 +1975,10 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
                 {"x": to_percent_x(d.x), "y": to_percent_y_bottom(d.y + d.height)},
             ]
             r_w, r_h = d.width, d.height
-            if d.section == 'up':
-                cx_local = d.circle_up_x if d.circle_up_x >= 0 else r_w / 2.0
-                cy_local = d.circle_up_y if d.circle_up_y >= 0 else r_h / 2.0
-                lvl = d.hint_level_up
-            else:
-                cx_local = d.circle_down_x if d.circle_down_x >= 0 else r_w / 2.0
-                cy_local = d.circle_down_y if d.circle_down_y >= 0 else r_h / 2.0
-                lvl = d.hint_level_down
-            if lvl > 0 and lvl <= len(RADIUS_LEVELS):
-                radius_px = float(RADIUS_LEVELS[lvl - 1])
-            else:
-                radius_px = min(r_w, r_h) / 2.0
+
+            cx_local = d.cx if d.cx >= 0 else r_w / 2.0
+            cy_local = d.cy if d.cy >= 0 else r_h / 2.0
+            lvl = d.hint_level
 
             data["differences"].append({
                 "id": d.id,
@@ -1953,13 +1988,6 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
                 "label": d.label or "",
                 "enabled": bool(d.enabled),
                 "points": points,
-                "hintCircle": {
-                    "x": to_percent_x(d.x + cx_local),
-                    "y": to_percent_y_bottom(d.y + cy_local),
-                    "radius": radius_px / 20.0,
-                    "isDragged": False,
-                    "visible": True
-                },
                 "hintLevel": int(lvl),
                 "circleLocal": {"x": cx_local, "y": cy_local}
             })
@@ -2047,12 +2075,9 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
                 y=min_y,
                 width=max(MIN_RECT_SIZE, max_x - min_x),
                 height=max(MIN_RECT_SIZE, max_y - min_y),
-                hint_level_up=int(diff.get('hintLevel', 0)),
-                circle_up_x=float(diff.get('circleLocal', {}).get('x', -1)),
-                circle_up_y=float(diff.get('circleLocal', {}).get('y', -1)),
-                hint_level_down=int(diff.get('hintLevel', 0)),
-                circle_down_x=float(diff.get('circleLocal', {}).get('x', -1)),
-                circle_down_y=float(diff.get('circleLocal', {}).get('y', -1)),
+                hint_level = int(diff.get('hintLevel', 0)),
+                cx=float(diff.get('circleLocal', {}).get('x', -1)),
+                cy=float(diff.get('circleLocal', {}).get('y', -1)),
             )
             self.differences.append(d)
             self._add_rect_items(d)
@@ -2284,12 +2309,12 @@ class AIWorker(QtCore.QObject):
                         pass
                 except Exception:
                     pass
-                finally:
-                    try:
-                        if os.path.isfile(tmp_path):
-                            os.remove(tmp_path)
-                    except Exception:
-                        pass
+                # finally:
+                    # try:
+                    #     # if os.path.isfile(tmp_path):
+                    #     #     os.remove(tmp_path)
+                    # except Exception:
+                    #     pass
                 step += 1
                 self.progressed.emit(step, total)
             # compute failures: region files not present
