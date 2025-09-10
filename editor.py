@@ -37,6 +37,7 @@ class Difference:
     category: str
     label: str
     enabled: bool
+    visible: bool
     # rectangle stored in natural pixel coordinates
     x: float
     y: float
@@ -879,8 +880,6 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
         self._syncing_selection: bool = False
         self._suppress_scene_selection: bool = False
         self.meta_status: str = 'unsaved'
-        # 记录每个茬点是否需要跑AI（id -> bool）
-        self.need_ai_by_id: Dict[str, bool] = {}
         # dirty state for title asterisk
         self._is_dirty: bool = False
         # 默认延迟磁盘写入，仅在显式保存或AI阶段落盘
@@ -928,8 +927,8 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
         self._update_status_bar()
         self._update_window_title()
         # 若初始状态为完成，禁用交互
-        if getattr(self, 'meta_status', None) == 'completed':
-            self._set_completed_ui_disabled(True)
+        # if getattr(self, 'meta_status', None) == 'completed':
+        #     self._set_completed_ui_disabled(True)
 
         # Shortcut: Cmd/Ctrl+S 保存
         self._sc_save = QtGui.QShortcut(QtGui.QKeySequence.Save, self)
@@ -951,7 +950,7 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
         human = text_map.get(getattr(self, 'meta_status', 'unsaved'), self.meta_status)
         try:
             # also show how many needAI
-            need_cnt = sum(1 for v in self.need_ai_by_id.values() if v)
+            need_cnt = sum(1 for v in self.differences if v.enabled)
             if need_cnt:
                 human = f"{human}（待AI处理 {need_cnt} 项）"
         except Exception:
@@ -960,7 +959,7 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
             self.status_bar.showMessage(f"状态：{human}")
 
         # 状态为完成时禁用相关交互，否则恢复
-        self._set_completed_ui_disabled(self.meta_status == 'completed')
+        # self._set_completed_ui_disabled(self.meta_status == 'completed')
 
     # --- AI status bar progress helpers ---
     def _ai_progress_start(self, total: int) -> None:
@@ -1065,15 +1064,11 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
         self._ai_progress_end()
         self._cleanup_ai_thread()
         if failed:
-            for idx, d in enumerate(self.differences, start=1):
-                self.need_ai_by_id[d.id] = (idx in failed)
             self._write_meta_status('hasError', persist=True)
             self.toggle_ai_preview.setChecked(False)
             self.toggle_ai_preview.setEnabled(False)
             self._remove_ai_overlays()
         else:
-            for d in self.differences:
-                self.need_ai_by_id[d.id] = False
             self._write_meta_status('completed', persist=True)
             self.toggle_ai_preview.setEnabled(True)
         if self.toggle_ai_preview.isChecked():
@@ -1143,13 +1138,13 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
             category=category or "",
             label="",
             enabled=True,
+            visible=True,
             x=rect.x(),
             y=rect.y(),
             width=rect.width(),
             height=rect.height(),
         )
         self.differences.append(diff)
-        self.need_ai_by_id[diff.id] = True
         self._add_rect_items(diff)
         self.rebuild_lists()
         self.update_total_count()
@@ -1255,9 +1250,6 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
                     d.set_label(diff.label, visible=(diff.section == 'down' and self.toggle_labels.isChecked()))
                 # --- END ---
                 self._update_radius_value_for_label(diff)
-                # 仅为发生变动的项设置需要重跑AI
-                if changed_id is None or diff.id == changed_id:
-                    self.need_ai_by_id[diff.id] = True
             # 如果不是AI处理中，整体状态切换为 待AI处理
             if self.meta_status != 'unsaved':
                 self._update_status_bar('unsaved')
@@ -1291,6 +1283,9 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
             enabled = QtWidgets.QCheckBox()
             enabled.setChecked(diff.enabled)
             enabled.stateChanged.connect(lambda _state, _id=diff.id: self.on_enabled_toggled(_id))
+            visibled = QtWidgets.QCheckBox()
+            visibled.setChecked(diff.enabled)
+            enabled.stateChanged.connect(lambda _state, _id=diff.id: self.on_visibled_toggled(_id))
             # radius display label (read-only)
             radius_label = QtWidgets.QLabel()
             radius_label.setObjectName(f"radius_{diff.id}")
@@ -1313,11 +1308,12 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
             btn_delete.setStyleSheet("QToolButton{border:none;background:transparent;} QToolButton:hover{background:rgba(220,53,69,0.12);border-radius:4px;}")
             btn_delete.clicked.connect(lambda _=False, _id=diff.id: self.delete_diff_by_id(_id))
 
-            gl.addWidget(title, 0, 0)
-            gl.addWidget(edit, 0, 1)
-            gl.addWidget(radius_label, 0, 2)
-            gl.addWidget(enabled, 0, 3)
-            gl.addWidget(btn_delete, 0, 4)
+            gl.addWidget(visibled, 0, 0)
+            gl.addWidget(title, 0, 1)
+            gl.addWidget(edit, 0, 2)
+            gl.addWidget(radius_label, 0, 3)
+            gl.addWidget(enabled, 0, 4)
+            gl.addWidget(btn_delete, 0, 5)
             gl.setColumnStretch(1, 1)
             w.setLayout(gl)
             item.setSizeHint(w.sizeHint())
@@ -1339,8 +1335,6 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
         if not diff:
             return
         diff.label = text
-        # 文本变化需要重新跑AI
-        self.need_ai_by_id[diff_id] = True
         if self.meta_status != 'unsaved':
             self._update_status_bar('unsaved')
         u = self.rect_items_up.get(diff.id)
@@ -1385,10 +1379,17 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
         if not diff:
             return
         diff.enabled = not diff.enabled
+        self.update_total_count()
+        # 重新启用时可标记需要重跑（可选，这里不强制）
+
+    def on_visibled_toggled(self, diff_id: str) -> None:
+        diff = next((d for d in self.differences if d.id == diff_id), None)
+        if not diff:
+            return
+        diff.visible = not diff.enabled
         self._apply_enabled_style(diff)
         self._sync_item_visibility(diff)
         self.update_total_count()
-        # 重新启用时可标记需要重跑（可选，这里不强制）
 
     def on_list_selection_changed(self) -> None:
         # reflect list selection to scene items (both up/down)
@@ -1476,11 +1477,7 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
         d = self.differences.pop(idx)
         u = self.rect_items_up.pop(d.id, None)
         dn = self.rect_items_down.pop(d.id, None)
-        # remove needAI entry for this id
-        try:
-            self.need_ai_by_id.pop(d.id, None)
-        except Exception:
-            pass
+
         # also remove AI overlays for this diff
         ou = self.ai_overlays_up.pop(d.id, None)
         od = self.ai_overlays_down.pop(d.id, None)
@@ -1645,7 +1642,7 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
 
     def update_total_count(self) -> None:
         count = sum(1 for d in self.differences if d.enabled)
-        self.total_count.setText(f"茬点总计：{count}")
+        self.total_count.setText(f"茬点总计：{len(self.differences)}, 已勾选AI处理:{count}项")
         # 没有茬点时，不允许进行AI处理
         try:
             self.btn_submit.setEnabled(count > 0)
@@ -1751,10 +1748,10 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
         # Step 2: 从 meta.json 中读取待处理索引（若存在），否则根据 needAI 计算
         targets: List[int] = []
         for idx, d in enumerate(self.differences, start=1):
-            if self.need_ai_by_id.get(d.id, True):
+            if d.enabled:
                 targets.append(idx)
         if not targets:
-            QtWidgets.QMessageBox.information(self, "AI处理", "无需处理，所有茬点均为最新。")
+            QtWidgets.QMessageBox.information(self, "AI处理", "未勾选茬点，请勾选要处理的茬点")
             return
         try:
             self._write_meta_status('aiPending', persist=True)
@@ -1792,14 +1789,10 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
         # merge or write meta.json
         meta_path = self.meta_json_path()
         # build needAI array by current differences order
-        need_ai_list = []
-        for d in self.differences:
-            need_ai_list.append(bool(self.need_ai_by_id.get(d.id, True)))
         meta = {
             "imageName": os.path.basename(self.pair.up_image_path),
             "imageSize": [int(self.up_scene.width()), int(self.up_scene.height())],
             "status": status,
-            "needAI": need_ai_list
         }
         if extra:
             try:
@@ -1885,41 +1878,11 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
         try:
             with open(cfg_path, 'w', encoding='utf-8') as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
+            QtWidgets.QMessageBox.information(self, "成功", f"配置保存成功\n")
         except Exception as exc:
             QtWidgets.QMessageBox.critical(self, "保存失败", str(exc))
             return
 
-        # write meta.json
-        # load origin image size
-        try:
-            # find origin file
-            origin = None
-            for ext in ['.png', '.jpg', '.jpeg', '.bmp', '.gif']:
-                p = os.path.join(self.level_dir(), f'origin{ext}')
-                if os.path.isfile(p):
-                    origin = p
-                    break
-            if origin is None:
-                origin = self.pair.up_image_path
-            img0 = QtGui.QImage(origin)
-            img_size = [int(img0.width()), int(img0.height())]
-            origin_name = os.path.basename(origin)
-        except Exception:
-            origin_name = os.path.basename(self.pair.up_image_path)
-            img_size = [int(w), int(h)]
-        meta = {
-            "imageName": origin_name,
-            "imageSize": img_size,
-            "status": getattr(self, 'meta_status', 'init'),
-            "needAI": [bool(self.need_ai_by_id.get(d.id, True)) for d in self.differences]
-        }
-        try:
-            with open(self.meta_json_path(), 'w', encoding='utf-8') as f:
-                json.dump(meta, f, ensure_ascii=False, indent=2)
-            if show_message:
-                QtWidgets.QMessageBox.information(self, "成功", f"配置保存成功\n{self.level_dir()}")
-        except Exception as exc:
-            QtWidgets.QMessageBox.critical(self, "保存失败", str(exc))
         self._update_status_bar()
 
     def _write_config_snapshot(self) -> None:
@@ -2000,7 +1963,6 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
             # treat as a new blank level
             self._clear_all_items()
             self.differences.clear()
-            self.need_ai_by_id.clear()
             self.rebuild_lists()
             self.update_total_count()
             self.toggle_ai_preview.setEnabled(False)
@@ -2079,9 +2041,7 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
                     self.toggle_ai_preview.setChecked(False)
                     self._remove_ai_overlays()
                 # 读取 needAI 数组（与 differences 顺序对应）
-                need_list = meta.get('needAI', [])
-                for idx, d in enumerate(self.differences):
-                    self.need_ai_by_id[d.id] = bool(need_list[idx]) if idx < len(need_list) else True
+                
                 self._update_status_bar(self.meta_status)
         except Exception:
             self.meta_status = 'unsaved'
