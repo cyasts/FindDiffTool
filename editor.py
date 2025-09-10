@@ -6,6 +6,8 @@ import time
 from dataclasses import dataclass, asdict
 import math
 from typing import Dict, List, Optional, Tuple
+import cv2
+import numpy as np
 
 from PySide6 import QtCore, QtGui, QtWidgets
 try:
@@ -77,6 +79,108 @@ def overlap_ratio(a: QtCore.QRectF, b: QtCore.QRectF) -> float:
     inter_area = max(0.0, inter.width()) * max(0.0, inter.height())
     min_area = max(1.0, min(a.width() * a.height(), b.width() * b.height()))
     return inter_area / min_area
+
+def _alpha_paste_no_resize_cv(src: np.ndarray, dst: np.ndarray, x: int, y: int) -> None:
+    """
+    src: BGR 或 BGRA(带alpha)；dst: BGR
+    不缩放；若越界自动裁剪；在 (x, y) 处贴入。
+    """
+    if src is None or dst is None:
+        return
+    sh, sw = src.shape[:2]
+    dh, dw = dst.shape[:2]
+
+    # 计算dst上的有效区域
+    dx1 = max(0, min(x, dw))
+    dy1 = max(0, min(y, dh))
+    dx2 = max(0, min(x + sw, dw))
+    dy2 = max(0, min(y + sh, dh))
+    if dx2 <= dx1 or dy2 <= dy1:
+        return
+
+    # 对应src的裁剪起点
+    sx1 = dx1 - x
+    sy1 = dy1 - y
+    sx2 = sx1 + (dx2 - dx1)
+    sy2 = sy1 + (dy2 - dy1)
+
+    src_roi = src[sy1:sy2, sx1:sx2]
+    dst_roi = dst[dy1:dy2, dx1:dx2]
+
+    if src_roi.shape[2] == 4:
+        # BGRA alpha 融合
+        src_bgr = src_roi[..., :3].astype(np.float32)
+        alpha = (src_roi[..., 3:4].astype(np.float32)) / 255.0  # (H,W,1)
+        out = src_bgr * alpha + dst_roi.astype(np.float32) * (1.0 - alpha)
+        dst[dy1:dy2, dx1:dx2] = out.astype(np.uint8)
+    else:
+        # 无alpha直接覆盖
+        dst[dy1:dy2, dx1:dx2] = src_roi
+
+def _to_bgr(img: np.ndarray, bg_bgr=(255, 255, 255)) -> np.ndarray:
+    """把可能的 BGRA 转成 BGR，并在给定背景色上做 alpha 合成。"""
+    if img is None:
+        return None
+    if img.ndim == 2:
+        img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+    if img.shape[2] == 3:
+        return img
+    if img.shape[2] == 4:
+        bgr = img[..., :3].astype(np.float32)
+        a = (img[..., 3:4].astype(np.float32)) / 255.0
+        bg = np.full_like(bgr, bg_bgr, dtype=np.float32)
+        out = bgr * a + bg * (1.0 - a)
+        return out.astype(np.uint8)
+    return img
+
+def compose_pin_layout(
+    origin_bgr: np.ndarray,
+    up_bgr: np.ndarray,
+    down_bgr: np.ndarray,
+    out_path: str,
+    margin: int = 40,
+    gap: int = 24,
+    bg_bgr=(255, 255, 255),
+) -> str:
+    """
+    生成“品”字形拼图（不缩放）：
+      顶部：origin 居中
+      底部：up、down 左右并排
+    画布大小按内容自适应：宽 = max(origin_w, up_w + gap + down_w) + 2*margin
+                         高 = margin + origin_h + gap + max(up_h, down_h) + margin
+    """
+    o = _to_bgr(origin_bgr, bg_bgr)
+    u = _to_bgr(up_bgr, bg_bgr)
+    d = _to_bgr(down_bgr, bg_bgr)
+
+    oh, ow = o.shape[:2]
+    uh, uw = u.shape[:2]
+    dh, dw = d.shape[:2]
+
+    inner_w = max(ow, uw + gap + dw)
+    inner_h = oh + gap + max(uh, dh)
+
+    canvas_w = inner_w + 2 * margin
+    canvas_h = inner_h + 2 * margin
+
+    canvas = np.full((canvas_h, canvas_w, 3), bg_bgr, dtype=np.uint8)
+
+    # 顶部 origin 居中
+    top_y = margin
+    top_x = margin + (inner_w - ow) // 2
+    canvas[top_y:top_y+oh, top_x:top_x+ow] = o
+
+    # 底部 up（左对齐）
+    bottom_y = margin + oh + gap
+    up_x = margin
+    canvas[bottom_y:bottom_y+uh, up_x:up_x+uw] = u
+
+    # 底部 down（右对齐）
+    down_x = margin + inner_w - dw
+    canvas[bottom_y:bottom_y+dh, down_x:down_x+dw] = d
+
+    cv2.imwrite(out_path, canvas)
+    return out_path
 
 class ImageEditRequester:
     def __init__(self, image_path: str, prompt: str):
@@ -800,7 +904,9 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
         # Bottom toolbar
         bottom = QtWidgets.QWidget()
         # Remove the top border line for a cleaner look
-        bottom.setStyleSheet("background:#fff;")
+        bottom.setStyleSheet("QWidget#bottomWidget { background: #fff; }")
+        # 需要给bottom widget设置objectName
+        bottom.setObjectName("bottomWidget")
         bottom.setMinimumHeight(56)
         bottom_layout = QtWidgets.QHBoxLayout(bottom)
         bottom_layout.setContentsMargins(16, 10, 16, 10)
@@ -917,6 +1023,7 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
         text_map = {
             'unsaved': '未保存',
             'saved': '待AI处理',
+            'aiPending': 'AI处理中',
             'completed': '完成',
             'hasError': 'AI处理存在错误',
         }
@@ -978,14 +1085,6 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
             self._ai_timer.timeout.connect(tick)
             self._ai_timer.start(120)
 
-    def _ai_progress_update(self, step: int, total: int) -> None:
-        if self.progress_use_dialog and getattr(self, '_ai_dlg', None) is not None:
-            self._ai_dlg.setMaximum(max(1, int(total)))
-            self._ai_dlg.setValue(int(step))
-        else:
-            self.ai_progress.setMaximum(max(1, int(total)))
-            self.ai_progress.setValue(int(step))
-
     def _ai_progress_end(self) -> None:
         try:
             if getattr(self, '_ai_timer', None) is not None:
@@ -1031,7 +1130,12 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
 
     @QtCore.Slot(int, int)
     def _ai_slot_progress(self, step: int, total: int) -> None:
-        self._ai_progress_update(step, total)
+        if self.progress_use_dialog and getattr(self, '_ai_dlg', None) is not None:
+            self._ai_dlg.setMaximum(max(1, int(total)))
+            self._ai_dlg.setValue(int(step))
+        else:
+            self.ai_progress.setMaximum(max(1, int(total)))
+            self.ai_progress.setValue(int(step))
 
     @QtCore.Slot(list)
     def _ai_slot_finished(self, failed: list) -> None:
@@ -1039,12 +1143,14 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
         self._cleanup_ai_thread()
         for d in self.differences:
             d.enabled = False
+        self._write_config_snapshot()
         self.rebuild_lists()
         self.update_total_count()
         if failed:
             self._write_meta_status('hasError', persist=True)
         else:
             self._write_meta_status('completed', persist=True)
+            self.export_pin_mosaic()
 
         QtWidgets.QMessageBox.information(self, "AI处理", "AI已完成处理")
 
@@ -1291,9 +1397,9 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
         d = self.rect_items_down.get(diff.id)
         self._make_dirty()
         if u:
-            u.update_label(diff.label)
+            u.update_label()
         if d:
-            d.update_label(diff.label)
+            d.update_label()
 
 
     def _make_dirty(self) -> None:
@@ -1677,7 +1783,7 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
             return
         # Step 1: alidation
         # 限制茬点数量：仅当启用的茬点数为 15/20/25 时允许AI处理
-        allowed_counts = {1, 15, 20, 25}
+        allowed_counts = {15, 20, 25}
         enabled_count = sum(1 for d in self.differences if d.enabled)
         if enabled_count not in allowed_counts:
             QtWidgets.QMessageBox.information(
@@ -2059,6 +2165,113 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
             return
         event.accept()
 
+
+    # --- ADD: 导出三张贴回结果（不缩放） ---
+    def export_composites_no_resize(self,
+                                    out_up: Optional[str] = None,
+                                    out_down: Optional[str] = None) -> Tuple[str, str]:
+        """
+        使用 level_dir 下 AI 产物 region{i}.png（按 differences 顺序）贴回到 origin 大图。
+        小图原尺寸不缩放；以矩形左上角 (d.x, d.y) 为锚点；越界自动裁剪。
+        生成：
+        - origin 拷贝
+        - 仅贴 up 区域的图
+        - 仅贴 down 区域的图
+        """
+        # 1) 找 origin
+        level_dir = self.level_dir()
+        origin_path = None
+        for ext in ['.png', '.jpg', '.jpeg']:
+            p = os.path.join(level_dir, f'origin{ext}')
+            if os.path.isfile(p):
+                origin_path = p
+                break
+        if origin_path is None:
+            origin_path = self.pair.up_image_path  # 兜底
+
+        big = cv2.imread(origin_path, cv2.IMREAD_UNCHANGED)
+        if big is None:
+            raise RuntimeError(f"无法读取大图：{origin_path}")
+
+        up_img = big.copy()
+        down_img = big.copy()
+
+        H, W = big.shape[:2]
+
+        # 2) 逐差异贴回（使用 region{i}.png）
+        for idx, d in enumerate(self.differences, start=1):
+            region_path = self.ai_result_path(idx)  # {level_dir}/region{idx}.png
+            if not os.path.isfile(region_path):
+                continue
+            small = cv2.imread(region_path, cv2.IMREAD_UNCHANGED)  # 可能 BGRA
+            if small is None:
+                continue
+
+            # 左上角锚点（自然像素）
+            l = int(round(d.x))
+            t = int(round(d.y))
+
+            if d.section == 'up':
+                _alpha_paste_no_resize_cv(small, up_img, l, t)
+            elif d.section == 'down':
+                _alpha_paste_no_resize_cv(small, down_img, l, t)
+            else:
+                # 未知 section，忽略
+                pass
+
+        # 3) 写盘
+        out_up     = out_up     or os.path.join(level_dir, "composite_up.png")
+        out_down   = out_down   or os.path.join(level_dir, "composite_down.png")
+
+        cv2.imwrite(out_up, up_img)
+        cv2.imwrite(out_down, down_img)
+
+        return  out_up, out_down
+
+    def export_pin_mosaic(self, out_path: Optional[str] = None,
+                      margin: int = 40, gap: int = 24) -> None:
+        """
+        先确保有三张图（origin/up/down），再合成“品”字形拼图。
+        如果还没导出过，则调用 export_composites_no_resize() 生成它们。
+        """
+        level_dir = self.level_dir()
+        out_path = out_path or os.path.join(level_dir, "apreview.png")
+
+        # 先找现成的三张图
+        origin_path = None
+        for ext in ['.png', '.jpg', '.jpeg']:
+            p = os.path.join(level_dir, f'origin{ext}')
+            if os.path.isfile(p):
+                origin_path = p
+                break
+        if origin_path is None:
+            origin_path = self.pair.up_image_path  # 兜底
+
+        up_path = os.path.join(level_dir, "composite_up.png")
+        down_path = os.path.join(level_dir, "composite_down.png")
+
+        # 若 up/down 不存在，就现做一次
+        need_build = (not os.path.isfile(up_path)) or (not os.path.isfile(down_path))
+        if need_build:
+            try:
+                self.export_composites_no_resize(out_up=up_path, out_down=down_path)
+            except Exception:
+                # 如果 export 失败，就直接用 origin 占位，以免中断
+                if not os.path.isfile(up_path):
+                    up_path = origin_path
+                if not os.path.isfile(down_path):
+                    down_path = origin_path
+
+        # 读图并合成
+        o = cv2.imread(origin_path, cv2.IMREAD_COLOR)
+        u = cv2.imread(up_path, cv2.IMREAD_COLOR)
+        d = cv2.imread(down_path, cv2.IMREAD_COLOR)
+        if o is None or u is None or d is None:
+            raise RuntimeError("读取 origin/up/down 失败，请检查路径。")
+
+        compose_pin_layout(o, u, d, out_path, margin=margin, gap=gap, bg_bgr=(255, 255, 255))
+        os.remove(up_path)
+        os.remove(down_path)
 
 class AIWorker(QtCore.QObject):
     progressed = QtCore.Signal(int, int)  # step, total
