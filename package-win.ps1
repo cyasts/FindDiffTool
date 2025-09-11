@@ -25,9 +25,6 @@ $pyiArgs = @(
   "--noconfirm",
   "--name", $Name,
   "--windowed",
-  "--add-data", "pyside_app\banana.py;pyside_app",
-  "--hidden-import", "PIL",
-  "--hidden-import", "requests"
 )
 if (Test-Path $IconPath) {
   $pyiArgs += @("--icon", $IconPath)

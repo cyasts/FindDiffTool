@@ -51,10 +51,6 @@ build_mac_arch() {
     --noconfirm
     --name "$NAME"
     --windowed
-    --hidden-import PIL
-    --hidden-import requests
-    --hidden-import editor
-    --hidden-import pyside_app.editor
   )
   if [ -f "$ICON_PATH" ]; then
     PYI_ARGS+=(--icon "$ICON_PATH")
@@ -101,10 +97,6 @@ build_mac_universal() {
     --name "$NAME"
     --windowed
     --target-arch universal2
-    --hidden-import PIL
-    --hidden-import requests
-    --hidden-import editor
-    --hidden-import pyside_app.editor
     --exclude-module PIL._webp
   )
   if [ -f "$ICON_PATH" ]; then
