@@ -1,15 +1,11 @@
-import json
-import os
-import requests
-import shutil
-import time
-from dataclasses import dataclass, asdict
-import math
+import os, json, requests
+import io, base64, math
+import shutil, time
+from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 import cv2
 import numpy as np
-from PIL import Image, ImageDraw, ImageFilter
-import io, base64, requests
+from PIL import Image
 
 from PySide6 import QtCore, QtGui, QtWidgets
 try:
@@ -194,9 +190,6 @@ def compose_pin_layout(
     return out_path
 
 # --- 字节版打包（左上角贴 ROI，右/下做边缘复制），保持 RGBA 透明 ---
-import io
-import numpy as np
-from PIL import Image
 
 CANVAS_W, CANVAS_H = 1152, 864  # 4:3
 
@@ -1856,7 +1849,6 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
                 inter_area = 3.141592653589793 * min(r1, r2) ** 2
             else:
                 # circle-circle intersection area formula
-                import math
                 alpha = math.acos((r1 * r1 + d * d - r2 * r2) / (2 * r1 * d))
                 beta = math.acos((r2 * r2 + d * d - r1 * r1) / (2 * r2 * d))
                 inter_area = r1 * r1 * alpha + r2 * r2 * beta - 0.5 * math.sin(2 * alpha) * r1 * r1 - 0.5 * math.sin(2 * beta) * r2 * r2
@@ -1970,7 +1962,6 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
         try:
             src_img = self.pair.up_image_path
             if os.path.isfile(src_img):
-                import shutil
                 _, ext = os.path.splitext(src_img)
                 if not ext:
                     ext = '.png'
@@ -2400,7 +2391,6 @@ class AIWorker(QtCore.QObject):
             total = len(self.target_indices)
             W, H = img.width(), img.height()
             step = 0
-            import shutil, time
             for idx in self.target_indices:
                 d = self.differences[idx - 1]
                 # 裁剪并调用AI
