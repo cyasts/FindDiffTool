@@ -8,6 +8,8 @@ import math
 from typing import Dict, List, Optional, Tuple
 import cv2
 import numpy as np
+from PIL import Image, ImageDraw, ImageFilter
+import io, base64, requests
 
 from PySide6 import QtCore, QtGui, QtWidgets
 try:
@@ -16,6 +18,8 @@ except Exception:  # pragma: no cover
     shiboken6 = None
 
 ENABLE_MOUSE : bool = True
+
+CANVAS_W, CANVAS_H = 1152, 864  # 4:3
 
 CATEGORY_COLOR_MAP: Dict[str, QtGui.QColor] = {
     '情感': QtGui.QColor('#ff7f50'),
@@ -106,16 +110,23 @@ def _alpha_paste_no_resize_cv(src: np.ndarray, dst: np.ndarray, x: int, y: int) 
 
     src_roi = src[sy1:sy2, sx1:sx2]
     dst_roi = dst[dy1:dy2, dx1:dx2]
+    # 目标的前三通道参与混合
+    dst_rgb = dst_roi[..., :3].astype(np.float32)
 
     if src_roi.shape[2] == 4:
-        # BGRA alpha 融合
-        src_bgr = src_roi[..., :3].astype(np.float32)
-        alpha = (src_roi[..., 3:4].astype(np.float32)) / 255.0  # (H,W,1)
-        out = src_bgr * alpha + dst_roi.astype(np.float32) * (1.0 - alpha)
-        dst[dy1:dy2, dx1:dx2] = out.astype(np.uint8)
+        src_rgb = src_roi[..., :3].astype(np.float32)
+        alpha   = (src_roi[..., 3:4].astype(np.float32)) / 255.0
+        out_rgb = src_rgb * alpha + dst_rgb * (1.0 - alpha)
+        dst_roi[..., :3] = out_rgb.astype(dst_roi.dtype)
+
+        # 可选：如果目标是 BGRA，可更新 A（预乘/直 alpha 任选其一；这里给直 alpha 的合成）
+        if dst_roi.shape[2] == 4:
+            dst_a = dst_roi[..., 3:4].astype(np.float32) / 255.0
+            out_a = alpha + dst_a * (1.0 - alpha)
+            dst_roi[..., 3] = (out_a * 255.0).astype(dst_roi.dtype).squeeze()
     else:
-        # 无alpha直接覆盖
-        dst[dy1:dy2, dx1:dx2] = src_roi
+        # 无 alpha 直接覆盖
+        dst_roi[..., :3] = src_roi[..., :3]
 
 def _to_bgr(img: np.ndarray, bg_bgr=(255, 255, 255)) -> np.ndarray:
     """把可能的 BGRA 转成 BGR，并在给定背景色上做 alpha 合成。"""
@@ -182,9 +193,160 @@ def compose_pin_layout(
     cv2.imwrite(out_path, canvas)
     return out_path
 
+# --- 字节版打包（左上角贴 ROI，右/下做边缘复制），保持 RGBA 透明 ---
+import io
+import numpy as np
+from PIL import Image
+
+CANVAS_W, CANVAS_H = 1152, 864  # 4:3
+
+def pack_center_with_mask_bytes(png_bytes: bytes, feather: int = 3):
+    im = Image.open(io.BytesIO(png_bytes)).convert("RGBA")
+    w, h = im.size
+    cw, ch = CANVAS_W, CANVAS_H
+    if w > cw or h > ch:
+        raise ValueError(f"ROI {w}x{h} 超过画布 {cw}x{ch}")
+
+    # 居中偏移
+    ox = (cw - w) // 2
+    oy = (ch - h) // 2
+
+    # 居中贴入画布（透明背景）
+    canvas = Image.new("RGBA", (cw, ch), (0, 0, 0, 0))
+    canvas.paste(im, (ox, oy))
+
+    # 生成 mask：白=可编辑，黑=不可编辑（若你的 API 语义相反，就把颜色反过来）
+    mask = Image.new("L", (cw, ch), 0)
+    mask.paste(255, (ox, oy, ox+w, oy +h))
+
+    cb = io.BytesIO(); canvas.save(cb, "PNG"); cb.seek(0)
+    mb = io.BytesIO(); mask.save(mb, "PNG");   mb.seek(0)
+    return cb.getvalue(), mb.getvalue(), (w, h), (ox, oy)
+
+def inner_feather_alpha(w: int, h: int, feather_px: int) -> np.ndarray:
+    """返回 HxW 的 0..255 uint8 alpha，仅向内衰减，不越界"""
+    if feather_px <= 0:
+        return np.full((h, w), 255, np.uint8)
+    yy, xx = np.ogrid[:h, :w]
+    d = np.minimum.reduce([xx, w-1-xx, yy, h-1-yy]).astype(np.float32)
+    a = np.clip(d / feather_px, 0, 1)
+    return (a * 255).astype(np.uint8)
+
+def make_rgba_with_inner_feather(patch_png_bytes: bytes, feather_px: int) -> bytes:
+    """把 AI 返回的 patch（PNG）转为 BGRA，并叠加向内羽化的 alpha；返回 PNG 字节"""
+    arr = np.frombuffer(patch_png_bytes, np.uint8)
+    img = cv2.imdecode(arr, cv2.IMREAD_UNCHANGED)  # BGR 或 BGRA
+    if img is None:
+        raise RuntimeError("decode patch failed")
+
+    h, w = img.shape[:2]
+    # 统一到4通道
+    if img.shape[2] == 3:
+        bgr = img
+        a = inner_feather_alpha(w, h, feather_px)
+        bgra = np.dstack([bgr, a])
+    else:
+        bgr = img[..., :3]
+        a0  = img[..., 3]
+        a1  = inner_feather_alpha(w, h, feather_px)
+        a   = cv2.min(a0, a1)  # 不改变已有透明度，向内再收一层
+        bgra = np.dstack([bgr, a])
+
+    ok, enc = cv2.imencode(".png", bgra)
+    if not ok:
+        raise RuntimeError("encode patch failed")
+    return enc.tobytes()
+
+def crop_back_center_bytes(png_bytes: bytes, roi_wh: tuple[int,int], offset: tuple[int,int]):
+    im = Image.open(io.BytesIO(png_bytes))
+    cw, ch = CANVAS_W, CANVAS_H
+    # 若返回不是 1152×864，只做裁/贴到该尺寸（不要 resize）
+    if im.size != (cw, ch):
+        if im.width >= cw and im.height >= ch:
+            im = im.crop((0, 0, cw, ch))
+        else:
+            c = Image.new(im.mode, (cw, ch))
+            c.paste(im, (0, 0))
+            im = c
+
+    w, h = roi_wh
+    ox, oy = offset
+    patch = im.crop((ox, oy, ox + w, oy + h))
+    b = io.BytesIO(); patch.save(b, "PNG"); b.seek(0)
+    return b.getvalue()
+
+def _inner_feather_alpha_cv(h: int, w: int, feather_px: int) -> np.ndarray:
+    """
+    生成二维 (h, w) 的 uint8 alpha，仅向内羽化；feather_px<=0 时全不透明。
+    采用“先 X 再 Y”的广播，避免 reduce 导致的对象数组。
+    """
+    if feather_px is None or feather_px <= 0:
+        return np.full((h, w), 255, np.uint8)
+
+    # X 方向到左右边的最小距离 -> 形状 (1, w)
+    x = np.arange(w, dtype=np.int32)
+    dx = np.minimum(x, w - 1 - x)[None, :]          # (1, w)
+
+    # Y 方向到上下边的最小距离 -> 形状 (h, 1)
+    y = np.arange(h, dtype=np.int32)
+    dy = np.minimum(y, h - 1 - y)[:, None]          # (h, 1)
+
+    # 广播成 (h, w)，再归一化到 0..255
+    d = np.minimum(dx.astype(np.float32), dy.astype(np.float32))  # (h, w)
+    a = np.clip(d / float(feather_px), 0.0, 1.0)
+    return (a * 255.0).astype(np.uint8)             # (h, w)
+
+
+def make_rgba_with_inner_feather_safe(patch_png_bytes: bytes,
+                                      feather_px: int = 8,
+                                      clamp_existing_alpha: bool = True) -> bytes:
+    """
+    输入：AI 返回的 patch（PNG 字节，可能是灰度/BGR/BGRA）
+    输出：带“向内羽化 alpha”的 BGRA PNG 字节（几何尺寸不变）
+    """
+    # —— 解码 —— #
+    arr = np.frombuffer(patch_png_bytes, np.uint8)
+    img = cv2.imdecode(arr, cv2.IMREAD_UNCHANGED)
+    if img is None:
+        raise RuntimeError("decode patch failed")
+
+    # 灰度->BGR；确保是 (h,w,3/4)
+    if img.ndim == 2:
+        img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+    if img.ndim != 3 or img.shape[2] not in (3, 4):
+        raise RuntimeError(f"unexpected image shape: {img.shape}")
+
+    h, w = img.shape[:2]
+    # —— 生成二维 alpha —— #
+    a_inner = _inner_feather_alpha_cv(h, w, feather_px)      # (h, w) uint8
+
+    # —— 拆通道 + 合并（避免 dstack/array 导致的形状不一致）—— #
+    if img.shape[2] == 3:
+        b, g, r = cv2.split(img)                             # (h, w) each
+        alpha = a_inner
+    else:
+        b, g, r, a0 = cv2.split(img)                         # (h, w) each
+        alpha = cv2.min(a0, a_inner) if clamp_existing_alpha else a_inner
+
+    # 连续内存 + uint8
+    b = np.ascontiguousarray(b, dtype=np.uint8)
+    g = np.ascontiguousarray(g, dtype=np.uint8)
+    r = np.ascontiguousarray(r, dtype=np.uint8)
+    alpha = np.ascontiguousarray(alpha, dtype=np.uint8)
+
+    # 最终 BGRA
+    bgra = cv2.merge((b, g, r, alpha))                       # (h, w, 4)
+
+    ok, enc = cv2.imencode(".png", bgra)
+    if not ok:
+        raise RuntimeError("encode patch failed")
+    return enc.tobytes()
+
 class ImageEditRequester:
-    def __init__(self, image_path: str, prompt: str):
+    def __init__(self, image_path: str, image_bytes: bytes, mask_bytes: bytes, prompt: str):
         self.image_path = image_path
+        self.image_bytes = image_bytes
+        self.mask_bytes = mask_bytes
         self.prompt = prompt
         self.BASE_URL = "https://ai.t8star.cn/"
         # 建议在系统环境变量中设置 BANANA_API_KEY，避免把密钥写入代码库
@@ -195,22 +357,23 @@ class ImageEditRequester:
             'Authorization': f'Bearer {self.API_KEY}'
         }
 
-    def send_request(self):
-        import base64
-        from PIL import Image
-
+    def send_request(self) -> bytes:
         # 记录原始图片尺寸
-        with Image.open(self.image_path) as img:
-            width, height = img.size
-
         files = [
-            ('image', (self.image_path, open(self.image_path, 'rb'), 'image/png')),
+            ('image', ('input.png', io.BytesIO(self.image_bytes), 'image/png')),
+            ('mask', ('mask.png', io.BytesIO(self.mask_bytes), 'image/png'))
         ]
+        # prop = (
+        #     "编辑区域为: mask 中像素值为(255,255,255)的区域"
+        #     "在input.png的可编辑区域内完成："
+        #     f"{self.prompt}"
+        # )
         payload = {
             'model': self.MODEL,
             'prompt': self.prompt,
             'response_format': 'b64_json',
-            'size': f"{width}x{height}",
+            'aspect_ratio': '4:3',
+            'size': f"{CANVAS_W}x{CANVAS_H}",
         }
         response = requests.request("POST", self.url, headers=self.headers, data=payload, files=files)
 
@@ -224,7 +387,6 @@ class ImageEditRequester:
 
         data0 = resp_json['data'][0]
         b64img = data0.get('b64_json')
-        out_path = self.image_path.replace('.png', '_result.png')
         if b64img:
             # 兼容 data url 前缀
             if b64img.startswith('data:image'):
@@ -235,22 +397,20 @@ class ImageEditRequester:
             if missing_padding:
                 b64img += '=' * (4 - missing_padding)
             img_bytes = base64.b64decode(b64img)
-            with open(out_path, 'wb') as f:
-                f.write(img_bytes)
+
         elif 'url' in data0:
             img_url = data0['url']
             img_resp = requests.get(img_url)
-            img_resp.raise_for_status()
-            with open(out_path, 'wb') as f:
-                f.write(img_resp.content)
+            img_bytes = img_resp.content
         else:
             raise RuntimeError("AI未返回b64或url")
 
-        # 保证输出尺寸一致
-        with Image.open(out_path) as out_img:
-            if out_img.size != (width, height):
-                out_img = out_img.resize((width, height), Image.LANCZOS)
-                out_img.save(out_path)
+        return img_bytes
+        # # 保证输出尺寸一致
+        # with Image.open(out_path) as out_img:
+        #     if out_img.size != (width, height):
+        #         out_img = out_img.resize((width, height), Image.LANCZOS)
+        #         out_img.save(out_path)
 
 class HandleItem(QtWidgets.QGraphicsEllipseItem):
     def __init__(self, size: float = 12.0, owner: Optional['DifferenceRectItem'] = None, index: int = 0):
@@ -852,9 +1012,9 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
         self._add_btns = list()
 
         # load images
-        up_pix = QtGui.QPixmap(self.pair.up_image_path)
-        down_pix = QtGui.QPixmap(self.pair.down_image_path)
-        if up_pix.isNull() or down_pix.isNull():
+        self.up_pix = QtGui.QPixmap(self.pair.up_image_path)
+        self.down_pix = QtGui.QPixmap(self.pair.down_image_path)
+        if self.up_pix.isNull() or self.down_pix.isNull():
             QtWidgets.QMessageBox.critical(self, "加载失败", "无法加载图片")
             self.close()
             return
@@ -868,8 +1028,8 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
         vbox_root.setSpacing(8)
 
         # Two sections (up/down)
-        self.up_scene = ImageScene(up_pix)
-        self.down_scene = ImageScene(down_pix)
+        self.up_scene = ImageScene(self.up_pix)
+        self.down_scene = ImageScene(self.down_pix)
         self.up_view = ImageView(self.up_scene)
         self.down_view = ImageView(self.down_scene)
 
@@ -881,7 +1041,7 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
         self.toggle_labels.setChecked(True)
         self.toggle_ai_preview = QtWidgets.QCheckBox("AI预览")
         self.toggle_ai_preview.setChecked(False)
-        self.toggle_ai_preview.setEnabled(False)
+        self.toggle_ai_preview.setEnabled(True)
 
         # Up row
         up_row = QtWidgets.QHBoxLayout()
@@ -953,8 +1113,27 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
         self.rect_items_up: Dict[str, DifferenceRectItem] = {}
         self.rect_items_down: Dict[str, DifferenceRectItem] = {}
         # AI 预览覆盖图层（仅当勾选 AI预览 时显示）
-        self.ai_overlays_up: Dict[str, QtWidgets.QGraphicsPixmapItem] = {}
-        self.ai_overlays_down: Dict[str, QtWidgets.QGraphicsPixmapItem] = {}
+        self.ai_overlays_up: QtWidgets.QGraphicsPixmapItem = QtWidgets.QGraphicsPixmapItem()
+        self.ai_overlays_up.setZValue(1)
+        self.ai_overlays_up.setOffset(0, 0)
+        self.ai_overlays_up.setPos(0, 0)
+        self.ai_overlays_up.setAcceptedMouseButtons(QtCore.Qt.NoButton) # 不拦截鼠标
+        self.ai_overlays_up.setCacheMode(QtWidgets.QGraphicsItem.DeviceCoordinateCache)
+        self.ai_overlays_up.setTransformationMode(QtCore.Qt.SmoothTransformation)
+        self.ai_overlays_up.setVisible(False)
+        self.up_scene.addItem(self.ai_overlays_up)
+        
+        self.ai_overlays_down: QtWidgets.QGraphicsPixmapItem = QtWidgets.QGraphicsPixmapItem()
+        self.ai_overlays_down.setZValue(1)
+        self.ai_overlays_down.setOffset(0, 0)
+        self.ai_overlays_down.setPos(0, 0)
+        self.ai_overlays_down.setAcceptedMouseButtons(QtCore.Qt.NoButton) # 不拦截鼠标
+        self.ai_overlays_down.setCacheMode(QtWidgets.QGraphicsItem.DeviceCoordinateCache)
+        self.ai_overlays_down.setTransformationMode(QtCore.Qt.SmoothTransformation)
+        self.ai_overlays_down.setVisible(False)
+        self.down_scene.addItem(self.ai_overlays_down)
+
+        self._refresh_ai_overlays()
         self._syncing_rect_update: bool = False
         self._syncing_selection: bool = False
         self._suppress_scene_selection: bool = False
@@ -1030,14 +1209,6 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
         human = text_map.get(getattr(self, 'meta_status', 'unsaved'), self.meta_status)
         if hasattr(self, 'status_bar') and self.status_bar is not None:
             self.status_bar.showMessage(f"状态：{human}")
-
-        #关闭ai预览和关闭勾选框
-        if self.meta_status != 'completed':
-            self.toggle_ai_preview.setChecked(False)
-            self._remove_ai_overlays()
-            self.toggle_ai_preview.setEnabled(False)
-        else:
-            self.toggle_ai_preview.setEnabled(True)
 
         # 状态为完成时禁用相关交互，否则恢复
         # self._set_completed_ui_disabled(self.meta_status == 'completed')
@@ -1148,11 +1319,13 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
         self.update_total_count()
         if failed:
             self._write_meta_status('hasError', persist=True)
+            QtWidgets.QMessageBox.information(self, "AI处理", "AI已完成处理, 但存在错误")
         else:
             self._write_meta_status('completed', persist=True)
-            self.export_pin_mosaic()
+            QtWidgets.QMessageBox.information(self, "AI处理", "AI已完成处理")
 
-        QtWidgets.QMessageBox.information(self, "AI处理", "AI已完成处理")
+        self.export_pin_mosaic()
+        self._refresh_ai_overlays()
 
     @QtCore.Slot(str)
     def _ai_slot_error(self, msg: str) -> None:
@@ -1162,7 +1335,6 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
         self._write_meta_status('hasError', persist=True)
         self.toggle_ai_preview.setChecked(False)
         self.toggle_ai_preview.setEnabled(False)
-        self._remove_ai_overlays()
 
     # Side panel with tag buttons and list
     def _build_side_panel(self, section: str) -> QtWidgets.QWidget:
@@ -1586,107 +1758,45 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
     # === AI 预览覆盖 ===
     def on_toggle_ai_preview(self) -> None:
         if self.toggle_ai_preview.isChecked():
-            self.refresh_ai_overlays()
+            self._enable_ai_overlays()
         else:
             self._remove_ai_overlays()
 
     def ai_result_path(self, index: int) -> str:
         return os.path.join(self.level_dir(), f"region{index}.png")
+    
+    def _enable_ai_overlays(self) -> None:
+        self.ai_overlays_up.setVisible(True)
+        self.ai_overlays_down.setVisible(True)
 
     def _remove_ai_overlays(self) -> None:
         # remove from scenes and clear
-        for item in list(self.ai_overlays_up.values()):
-            try:
-                self.up_scene.removeItem(item)
-            except Exception:
-                pass
-        for item in list(self.ai_overlays_down.values()):
-            try:
-                self.down_scene.removeItem(item)
-            except Exception:
-                pass
-        self.ai_overlays_up.clear()
-        self.ai_overlays_down.clear()
+        self.ai_overlays_up.setVisible(False)
+        self.ai_overlays_down.setVisible(False)
 
-    def _scale_center_ai_overlay(self, pm: QtGui.QPixmap, w: int, h: int) -> tuple[QtGui.QPixmap, float, float]:
-        """按比例缩放并计算把缩放后图像居中贴入 w*h 框的 dx/dy 偏移。"""
-        try:
-            # 规一 HiDPI，避免 DPR 导致的1px偏差
-            if pm.devicePixelRatio() != 1:
-                img = pm.toImage()
-                img.setDevicePixelRatio(1.0)
-                pm = QtGui.QPixmap.fromImage(img)
-        except Exception:
-            pass
-        scaled = pm.scaled(w, h, QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation)
-        dx = (w - scaled.width()) * 0.5
-        dy = (h - scaled.height()) * 0.5
-        return scaled, dx, dy
-
-    def refresh_ai_overlays(self) -> None:
+    def _refresh_ai_overlays(self) -> None:
         # rebuild overlays from disk according to current differences order
-        self._remove_ai_overlays()
-        if not self.toggle_ai_preview.isChecked():
-            return
-        for idx, d in enumerate(self.differences, start=1):
-            path = self.ai_result_path(idx)
-            if not os.path.isfile(path):
-                continue
-            pm = QtGui.QPixmap(path)
-            if pm.isNull():
-                continue
-            pm.setDevicePixelRatio(1.0)  # 避免结果图自带 DPR 干扰
-            rect = self._ai_crop_rect_px(d)
-            scaled = pm.scaled(rect.width(), rect.height(),
-                   QtCore.Qt.KeepAspectRatio,
-                   QtCore.Qt.SmoothTransformation)
+        level_dir = self.level_dir()
+        up_path = os.path.join(level_dir, "composite_up.png")
+        down_path = os.path.join(level_dir, "composite_down.png")
 
-            item = QtWidgets.QGraphicsPixmapItem(scaled)
-            # ——用中心锚点，彻底规避奇偶像素误差——
-            item.setOffset(-scaled.width() / 2.0, -scaled.height() / 2.0)
-            item.setPos(rect.center().x(), rect.center().y())
-            item.setZValue(0.5)
+        # 若 up/down 不存在，就现做一次
+        need_build = (not os.path.isfile(up_path)) or (not os.path.isfile(down_path))
+        if need_build :
+            w = self.up_pix.width()
+            h = self.up_pix.height()
+            pixup = QtGui.QPixmap(w, h)
+            pixup.fill(QtCore.Qt.transparent)
+            self.ai_overlays_up.setPixmap(pixup)
+            pixdown = QtGui.QPixmap(w, h)
+            pixdown.fill(QtCore.Qt.transparent)
+            self.ai_overlays_down.setPixmap(pixdown)
+        else:
+            pixup = QtGui.QPixmap(up_path)
+            pixdown = QtGui.QPixmap(down_path)
 
-            if d.section == 'up':
-                self.up_scene.addItem(item)
-                self.ai_overlays_up[d.id] = item
-            else:
-                self.down_scene.addItem(item)
-                self.ai_overlays_down[d.id] = item
-
-    def _ai_crop_rect_px(self, d: Difference) -> QtCore.QRect:
-        # 用整数真实像素，并限制在对应场景边界
-        x = max(0, int(round(d.x)))
-        y = max(0, int(round(d.y)))
-        w = max(1, int(round(d.width)))
-        h = max(1, int(round(d.height)))
-        scene = self.up_scene if d.section == 'up' else self.down_scene
-        bounds = QtCore.QRect(0, 0, int(scene.width()), int(scene.height()))
-        return QtCore.QRect(x, y, w, h).intersected(bounds)
-
-    def _update_ai_overlay_geometry(self) -> None:
-        if not self.toggle_ai_preview.isChecked():
-            return
-        for d in self.differences:
-            item = (self.ai_overlays_up if d.section == 'up' else self.ai_overlays_down).get(d.id)
-            if not item:
-                continue
-            try:
-                rect = self._ai_crop_rect_px(d)
-                # 重新对齐中心
-                item.setPos(rect.center().x(), rect.center().y())
-                cur = item.pixmap()
-                if not cur.isNull() and (cur.width() != rect.width() or cur.height() != rect.height()):
-                    scaled = cur.scaled(rect.width(), rect.height(),
-                                        QtCore.Qt.KeepAspectRatio,
-                                        QtCore.Qt.SmoothTransformation)
-                    item.setPixmap(scaled)
-                    item.setOffset(-scaled.width() / 2.0, -scaled.height() / 2.0)
-                else:
-                    # 保证中心锚点存在
-                    item.setOffset(-cur.width() / 2.0, -cur.height() / 2.0)
-            except Exception:
-                pass
+        self.ai_overlays_up.setPixmap(pixup)
+        self.ai_overlays_down.setPixmap(pixdown)
 
     def update_total_count(self) -> None:
         count = sum(1 for d in self.differences if d.enabled)
@@ -1782,14 +1892,14 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
             QtWidgets.QMessageBox.information(self, "提示", "当前修改尚未保存，请先保存后再进行AI处理。")
             return
         # Step 1: alidation
-        # 限制茬点数量：仅当启用的茬点数为 15/20/25 时允许AI处理
+        # 限制茬点数量：仅当茬点数为 15/20/25 时允许AI处理
         allowed_counts = {15, 20, 25}
-        enabled_count = sum(1 for d in self.differences if d.enabled)
-        if enabled_count not in allowed_counts:
+        current_count = len(self.differences)
+        if current_count not in allowed_counts:
             QtWidgets.QMessageBox.information(
                 self,
                 "AI处理",
-                f"当前启用的茬点数为 {enabled_count}，AI处理仅支持 15、20 或 25 个，请调整后重试。"
+                f"当前茬点数为 {current_count}，仅支持 15、20 或 25 个，请调整后重试。"
             )
             return
 
@@ -2023,28 +2133,17 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
 
         # refresh AI overlays based on current differences
         if self.toggle_ai_preview.isChecked():
-            self.refresh_ai_overlays()
+            self._refresh_ai_overlays()
 
         # read meta.json if exists
         try:
             with open(os.path.join(dir_path, 'meta.json'), 'r', encoding='utf-8') as f:
                 meta = json.load(f)
                 self.meta_status = meta.get('status', 'unsaved')
-                # 根据历史状态设置AI预览开关可用性
-                if self.meta_status == 'completed':
-                    self.toggle_ai_preview.setEnabled(True)
-                else:
-                    self.toggle_ai_preview.setEnabled(False)
-                    self.toggle_ai_preview.setChecked(False)
-                    self._remove_ai_overlays()
-                # 读取 needAI 数组（与 differences 顺序对应）
                 
                 self._update_status_bar(self.meta_status)
         except Exception:
             self.meta_status = 'unsaved'
-            self.toggle_ai_preview.setEnabled(False)
-            self.toggle_ai_preview.setChecked(False)
-            self._remove_ai_overlays()
             self._update_status_bar(self.meta_status)
 
     # selection changed slots
@@ -2208,8 +2307,14 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
                 continue
 
             # 左上角锚点（自然像素）
-            l = int(round(d.x))
-            t = int(round(d.y))
+            l  = int(math.floor(d.x))
+            t  = int(math.floor(d.y))
+            iw = int(math.ceil(d.x + d.width)  - math.floor(d.x))
+            ih = int(math.ceil(d.y + d.height) - math.floor(d.y))
+
+            # 若 AI 回图尺寸有变，强制还原到期望尺寸（无缩放需求建议用最近邻）
+            if small.shape[1] != iw or small.shape[0] != ih:
+                small = cv2.resize(small, (iw, ih), interpolation=cv2.INTER_NEAREST)
 
             if d.section == 'up':
                 _alpha_paste_no_resize_cv(small, up_img, l, t)
@@ -2251,16 +2356,14 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
         down_path = os.path.join(level_dir, "composite_down.png")
 
         # 若 up/down 不存在，就现做一次
-        need_build = (not os.path.isfile(up_path)) or (not os.path.isfile(down_path))
-        if need_build:
-            try:
-                self.export_composites_no_resize(out_up=up_path, out_down=down_path)
-            except Exception:
-                # 如果 export 失败，就直接用 origin 占位，以免中断
-                if not os.path.isfile(up_path):
-                    up_path = origin_path
-                if not os.path.isfile(down_path):
-                    down_path = origin_path
+        try:
+            self.export_composites_no_resize(out_up=up_path, out_down=down_path)
+        except Exception:
+            # 如果 export 失败，就直接用 origin 占位，以免中断
+            if not os.path.isfile(up_path):
+                up_path = origin_path
+            if not os.path.isfile(down_path):
+                down_path = origin_path
 
         # 读图并合成
         o = cv2.imread(origin_path, cv2.IMREAD_COLOR)
@@ -2270,8 +2373,8 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
             raise RuntimeError("读取 origin/up/down 失败，请检查路径。")
 
         compose_pin_layout(o, u, d, out_path, margin=margin, gap=gap, bg_bgr=(255, 255, 255))
-        os.remove(up_path)
-        os.remove(down_path)
+
+    
 
 class AIWorker(QtCore.QObject):
     progressed = QtCore.Signal(int, int)  # step, total
@@ -2288,50 +2391,57 @@ class AIWorker(QtCore.QObject):
     @QtCore.Slot()
     def run(self) -> None:
         try:
-            img = QtGui.QImage(self.origin_path)
+            reader = QtGui.QImageReader(self.origin_path)
+            reader.setAutoTransform(False)  # 与 cv2.imread 保持一致
+            img = reader.read()
             if img.isNull():
                 raise RuntimeError('无法打开 origin 图像')
 
             total = len(self.target_indices)
+            W, H = img.width(), img.height()
             step = 0
             import shutil, time
             for idx in self.target_indices:
                 d = self.differences[idx - 1]
                 # 裁剪并调用AI
-                x = max(0, int(round(d.x)))
-                y = max(0, int(round(d.y)))
-                w = max(1, int(round(d.width)))
-                h = max(1, int(round(d.height)))
-                rect = QtCore.QRect(x, y, w, h).intersected(img.rect())
-                if rect.isEmpty():
-                    # count as failed
+                # 左上角取 floor；右下角取 ceil；宽高为开区间差
+                l = int(math.floor(d.x))
+                t = int(math.floor(d.y))
+                r = int(math.ceil(d.x + d.width))
+                b = int(math.ceil(d.y + d.height))
+
+                # 与大图范围相交（开区间），同时保证 l<t<r<b
+                l = max(0, min(l, W))
+                t = max(0, min(t, H))
+                r = max(0, min(r, W))
+                b = max(0, min(b, H))
+                if r <= l or b <= t:
                     step += 1
                     self.progressed.emit(step, total)
                     continue
-                tmp_path = os.path.join(self.level_dir, f'__tmp_region{idx}.png')
-                img.copy(rect).save(tmp_path)
-                try:
-                    req = ImageEditRequester(tmp_path, (d.label or '').strip())
-                    req.send_request()
-                    out_path = tmp_path.replace('.png', '_result.png')
-                    for _ in range(10):
-                        if os.path.isfile(out_path):
-                            break
-                        time.sleep(0.2)
-                    if os.path.isfile(out_path):
-                        dst = os.path.join(self.level_dir, f'region{idx}.png')
-                        shutil.move(out_path, dst)
-                    else:
-                        # mark failure by keeping tmp missing
-                        pass
-                except Exception:
-                    pass
-                finally:
-                    try:
-                        if os.path.isfile(tmp_path):
-                            os.remove(tmp_path)
-                    except Exception:
-                        pass
+
+                w = r - l
+                h = b - t
+                rect = QtCore.QRect(l, t, w, h)
+                subimg = img.copy(rect)
+                buf = QtCore.QBuffer()
+                buf.open(QtCore.QIODevice.ReadWrite)
+                subimg.save(buf, "PNG")                 # 编码到内存
+                png_bytes = bytes(buf.data())           # 转成 Python bytes
+                buf.close()
+
+                # 1) 打包到 1152x864 左上角
+                canvas_bytes, mask_bytes, (w, h), (ox, oy) = pack_center_with_mask_bytes(png_bytes, feather=0)
+
+                req = ImageEditRequester("input", canvas_bytes, mask_bytes, (d.label or '').strip())
+                out_bytes = req.send_request()
+
+                patch_bytes = crop_back_center_bytes(out_bytes, (w, h), (ox, oy))
+                # 加“向内羽化”生成 RGBA
+                patch_rgba_bytes = make_rgba_with_inner_feather_safe(patch_bytes, feather_px=8)
+                dst = os.path.join(self.level_dir, f'region{idx}.png')
+                with open(dst, 'wb') as f:
+                    f.write(patch_rgba_bytes)
                 step += 1
                 self.progressed.emit(step, total)
             # compute failures: region files not present
