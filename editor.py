@@ -2455,29 +2455,29 @@ class AIWorker(QtCore.QObject):
                 png_bytes = bytes(buf.data())           # 转成 Python bytes
                 buf.close()
 
-                path = os.path.join(self.level_dir,  f"rect_{idx}.png")
-                with open(path, "wb") as f:
-                    f.write(png_bytes)
+                # path = os.path.join(self.level_dir,  f"rect_{idx}.png")
+                # with open(path, "wb") as f:
+                #     f.write(png_bytes)
 
                 # 1) 打包到 1152x864 左上角
                 canvas_bytes, (w, h), (ox, oy) = pack_center_with_mask_bytes(png_bytes, feather=0)
 
-                path = os.path.join(self.level_dir,  f"expand_{idx}.png")
-                with open(path, "wb") as f:
-                    f.write(canvas_bytes)
+                # path = os.path.join(self.level_dir,  f"expand_{idx}.png")
+                # with open(path, "wb") as f:
+                #     f.write(canvas_bytes)
 
                 req = ImageEditRequester("input", canvas_bytes, (d.label or '').strip())
                 out_bytes = sanitize_png_pillow(req.send_request())
 
-                path = os.path.join(self.level_dir, f"out_{idx}.png")
-                with open(path, "wb") as f:
-                    f.write(out_bytes)
+                # path = os.path.join(self.level_dir, f"out_{idx}.png")
+                # with open(path, "wb") as f:
+                #     f.write(out_bytes)
 
                 patch_bytes = crop_back_center_bytes(out_bytes, (w, h), (ox, oy))
 
-                path = os.path.join(self.level_dir, f"patch_{idx}.png")
-                with open(path, "wb") as f:
-                    f.write(patch_bytes)
+                # path = os.path.join(self.level_dir, f"patch_{idx}.png")
+                # with open(path, "wb") as f:
+                #     f.write(patch_bytes)
                 # 加“向内羽化”生成 RGBA
                 patch_rgba_bytes = make_rgba_with_inner_feather_safe(patch_bytes, feather_px=8)
                 dst = os.path.join(self.level_dir, f'region{idx}.png')
