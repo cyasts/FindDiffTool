@@ -143,7 +143,7 @@ def compose_pin_layout(
     bg_bgr=(255, 255, 255),
 ) -> str:
     """
-    生成“品”字形拼图（不缩放）：
+    生成“倒品”字形拼图（不缩放）：
       顶部：origin 居中
       底部：up、down 左右并排
     画布大小按内容自适应：宽 = max(origin_w, up_w + gap + down_w) + 2*margin
@@ -165,19 +165,19 @@ def compose_pin_layout(
 
     canvas = np.full((canvas_h, canvas_w, 3), bg_bgr, dtype=np.uint8)
 
-    # 顶部 origin 居中
+
+    # 顶部 up 和 down 左右并排
     top_y = margin
-    top_x = margin + (inner_w - ow) // 2
-    canvas[top_y:top_y+oh, top_x:top_x+ow] = o
-
-    # 底部 up（左对齐）
-    bottom_y = margin + oh + gap
     up_x = margin
-    canvas[bottom_y:bottom_y+uh, up_x:up_x+uw] = u
+    canvas[top_y:top_y+uh, up_x:up_x+uw] = u
 
-    # 底部 down（右对齐）
-    down_x = margin + inner_w - dw
-    canvas[bottom_y:bottom_y+dh, down_x:down_x+dw] = d
+    down_x = margin + uw + gap
+    canvas[top_y:top_y+dh, down_x:down_x+dw] = d
+
+    # 底部 origin 居中
+    origin_y = top_y + uh + gap
+    origin_x = margin + (inner_w - ow) // 2
+    canvas[origin_y:origin_y+oh, origin_x:origin_x+ow] = o
 
     cv2.imwrite(out_path, canvas)
     return out_path
