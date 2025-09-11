@@ -186,7 +186,7 @@ def compose_pin_layout(
     origin_x = margin + (inner_w - ow) // 2
     canvas[origin_y:origin_y+oh, origin_x:origin_x+ow] = o
 
-    cv2.imwrite(out_path, canvas)
+    _imwrite_any(out_path, canvas)
     return out_path
 
 # --- 字节版打包（左上角贴 ROI，右/下做边缘复制），保持 RGBA 透明 ---
@@ -214,7 +214,7 @@ def pack_center_with_mask_bytes(png_bytes: bytes, feather: int = 3):
 
     cb = io.BytesIO(); canvas.save(cb, "PNG"); cb.seek(0)
     mb = io.BytesIO(); mask.save(mb, "PNG");   mb.seek(0)
-    return cb.getvalue(), mb.getvalue(), (w, h), (ox, oy)
+    return cb.getvalue(), (w, h), (ox, oy)
 
 def inner_feather_alpha(w: int, h: int, feather_px: int) -> np.ndarray:
     """返回 HxW 的 0..255 uint8 alpha，仅向内衰减，不越界"""
@@ -335,11 +335,49 @@ def make_rgba_with_inner_feather_safe(patch_png_bytes: bytes,
         raise RuntimeError("encode patch failed")
     return enc.tobytes()
 
+def sanitize_png_pillow(png_bytes: bytes, keep_dpi=True) -> bytes:
+    im = Image.open(io.BytesIO(png_bytes))
+    params = {}
+    if keep_dpi and "dpi" in im.info:
+        params["dpi"] = im.info["dpi"]
+    # 不传 exif/pnginfo，Pillow 不会写 eXIf
+    bio = io.BytesIO()
+    im.save(bio, "PNG", **params)
+    return bio.getvalue()
+
+def _imread_any(path: str, flags=cv2.IMREAD_UNCHANGED):
+    """稳读任意路径（含中文/空格/长路径）"""
+    try:
+        # 归一化 & 长路径前缀（极端长路径时）
+        p = os.path.normpath(path)
+        if len(p) >= 255 and not p.startswith("\\\\?\\"):
+            p = "\\\\?\\" + os.path.abspath(p)
+        arr = np.fromfile(p, dtype=np.uint8)  # 不经由 C 的窄字符路径
+        if arr.size == 0:
+            return None
+        return cv2.imdecode(arr, flags)
+    except Exception:
+        return None
+
+def _imwrite_any(path: str, img: np.ndarray) -> bool:
+    """稳写任意路径（含中文/空格/长路径）"""
+    try:
+        ext = os.path.splitext(path)[1] or ".png"
+        ok, buf = cv2.imencode(ext, img)
+        if not ok:
+            return False
+        p = os.path.normpath(path)
+        if len(p) >= 255 and not p.startswith("\\\\?\\"):
+            p = "\\\\?\\" + os.path.abspath(p)
+        buf.tofile(p)
+        return True
+    except Exception:
+        return False
+
 class ImageEditRequester:
-    def __init__(self, image_path: str, image_bytes: bytes, mask_bytes: bytes, prompt: str):
+    def __init__(self, image_path: str, image_bytes: bytes, prompt: str):
         self.image_path = image_path
         self.image_bytes = image_bytes
-        self.mask_bytes = mask_bytes
         self.prompt = prompt
         self.BASE_URL = "https://ai.t8star.cn/"
         # 建议在系统环境变量中设置 BANANA_API_KEY，避免把密钥写入代码库
@@ -353,17 +391,16 @@ class ImageEditRequester:
     def send_request(self) -> bytes:
         # 记录原始图片尺寸
         files = [
-            ('image', ('input.png', io.BytesIO(self.image_bytes), 'image/png')),
-            ('mask', ('mask.png', io.BytesIO(self.mask_bytes), 'image/png'))
+            ('image', ('input.png', io.BytesIO(self.image_bytes), 'image/png'))
         ]
-        # prop = (
-        #     "编辑区域为: mask 中像素值为(255,255,255)的区域"
-        #     "在input.png的可编辑区域内完成："
-        #     f"{self.prompt}"
-        # )
+        prop = (
+            "仅在中心贴入的目标区域内进行修改；其他区域保持像素级完全不变。"
+            "禁止移动/缩放/旋转/裁剪/全局调色或风格化，输出分辨率与输入一致。"
+            f"{self.prompt}；边界需与周围自然过渡，避免边框/光晕/色阶跳变。"
+        )
         payload = {
             'model': self.MODEL,
-            'prompt': self.prompt,
+            'prompt': prop,
             'response_format': 'b64_json',
             'aspect_ratio': '4:3',
             'size': f"{CANVAS_W}x{CANVAS_H}",
@@ -1600,7 +1637,6 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
             return
         diff.visible = not diff.visible
         self._apply_enabled_style(diff)
-        print("visible toggled")
         self._sync_item_visibility(diff)
 
     def on_list_selection_changed(self) -> None:
@@ -2279,7 +2315,7 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
         if origin_path is None:
             origin_path = self.pair.up_image_path  # 兜底
 
-        big = cv2.imread(origin_path, cv2.IMREAD_UNCHANGED)
+        big = _imread_any(origin_path, cv2.IMREAD_UNCHANGED)
         if big is None:
             raise RuntimeError(f"无法读取大图：{origin_path}")
 
@@ -2293,7 +2329,7 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
             region_path = self.ai_result_path(idx)  # {level_dir}/region{idx}.png
             if not os.path.isfile(region_path):
                 continue
-            small = cv2.imread(region_path, cv2.IMREAD_UNCHANGED)  # 可能 BGRA
+            small = _imread_any(region_path, cv2.IMREAD_UNCHANGED)  # 可能 BGRA
             if small is None:
                 continue
 
@@ -2314,13 +2350,12 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
             else:
                 # 未知 section，忽略
                 pass
-
         # 3) 写盘
         out_up     = out_up     or os.path.join(level_dir, "composite_up.png")
         out_down   = out_down   or os.path.join(level_dir, "composite_down.png")
 
-        cv2.imwrite(out_up, up_img)
-        cv2.imwrite(out_down, down_img)
+        _imwrite_any(out_up, up_img)
+        _imwrite_any(out_down, down_img)
 
         return  out_up, out_down
 
@@ -2357,9 +2392,9 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
                 down_path = origin_path
 
         # 读图并合成
-        o = cv2.imread(origin_path, cv2.IMREAD_COLOR)
-        u = cv2.imread(up_path, cv2.IMREAD_COLOR)
-        d = cv2.imread(down_path, cv2.IMREAD_COLOR)
+        o = _imread_any(origin_path, cv2.IMREAD_COLOR)
+        u = _imread_any(up_path, cv2.IMREAD_COLOR)
+        d = _imread_any(down_path, cv2.IMREAD_COLOR)
         if o is None or u is None or d is None:
             raise RuntimeError("读取 origin/up/down 失败，请检查路径。")
 
@@ -2383,7 +2418,7 @@ class AIWorker(QtCore.QObject):
     def run(self) -> None:
         try:
             reader = QtGui.QImageReader(self.origin_path)
-            reader.setAutoTransform(False)  # 与 cv2.imread 保持一致
+            reader.setAutoTransform(False)  # 与 _imread_any 保持一致
             img = reader.read()
             if img.isNull():
                 raise RuntimeError('无法打开 origin 图像')
@@ -2420,13 +2455,29 @@ class AIWorker(QtCore.QObject):
                 png_bytes = bytes(buf.data())           # 转成 Python bytes
                 buf.close()
 
-                # 1) 打包到 1152x864 左上角
-                canvas_bytes, mask_bytes, (w, h), (ox, oy) = pack_center_with_mask_bytes(png_bytes, feather=0)
+                path = os.path.join(self.level_dir,  f"rect_{idx}.png")
+                with open(path, "wb") as f:
+                    f.write(png_bytes)
 
-                req = ImageEditRequester("input", canvas_bytes, mask_bytes, (d.label or '').strip())
-                out_bytes = req.send_request()
+                # 1) 打包到 1152x864 左上角
+                canvas_bytes, (w, h), (ox, oy) = pack_center_with_mask_bytes(png_bytes, feather=0)
+
+                path = os.path.join(self.level_dir,  f"expand_{idx}.png")
+                with open(path, "wb") as f:
+                    f.write(canvas_bytes)
+
+                req = ImageEditRequester("input", canvas_bytes, (d.label or '').strip())
+                out_bytes = sanitize_png_pillow(req.send_request())
+
+                path = os.path.join(self.level_dir, f"out_{idx}.png")
+                with open(path, "wb") as f:
+                    f.write(out_bytes)
 
                 patch_bytes = crop_back_center_bytes(out_bytes, (w, h), (ox, oy))
+
+                path = os.path.join(self.level_dir, f"patch_{idx}.png")
+                with open(path, "wb") as f:
+                    f.write(patch_bytes)
                 # 加“向内羽化”生成 RGBA
                 patch_rgba_bytes = make_rgba_with_inner_feather_safe(patch_bytes, feather_px=8)
                 dst = os.path.join(self.level_dir, f'region{idx}.png')
