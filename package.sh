@@ -51,7 +51,6 @@ build_mac_arch() {
     --noconfirm
     --name "$NAME"
     --windowed
-    --add-data "$APP_DIR/banana.py:$( [ "$APP_DIR" = "." ] && echo "." || echo "$APP_DIR" )"
     --hidden-import PIL
     --hidden-import requests
     --hidden-import editor
@@ -102,7 +101,6 @@ build_mac_universal() {
     --name "$NAME"
     --windowed
     --target-arch universal2
-    --add-data "$APP_DIR/banana.py:$( [ "$APP_DIR" = "." ] && echo "." || echo "$APP_DIR" )"
     --hidden-import PIL
     --hidden-import requests
     --hidden-import editor

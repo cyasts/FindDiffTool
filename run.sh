@@ -20,7 +20,7 @@ python -m pip install --upgrade pip setuptools wheel >/dev/null
 # Ensure required dependencies
 if ! python - <<'PY'
 import importlib.util
-mods = ["PySide6", "PIL", "requests"]
+mods = ["PySide6", "PIL", "requests", "opencv-python", "numpy"]
 missing = [m for m in mods if importlib.util.find_spec(m) is None]
 raise SystemExit(1 if missing else 0)
 PY
