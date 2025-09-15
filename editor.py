@@ -189,162 +189,6 @@ def compose_pin_layout(
     _imwrite_any(out_path, canvas)
     return out_path
 
-# --- 字节版打包（左上角贴 ROI，右/下做边缘复制），保持 RGBA 透明 ---
-
-CANVAS_W, CANVAS_H = 1152, 864  # 4:3
-
-def pack_center_with_mask_bytes(png_bytes: bytes, feather: int = 3):
-    im = Image.open(io.BytesIO(png_bytes)).convert("RGBA")
-    w, h = im.size
-    cw, ch = CANVAS_W, CANVAS_H
-    if w > cw or h > ch:
-        raise ValueError(f"ROI {w}x{h} 超过画布 {cw}x{ch}")
-
-    # 居中偏移
-    ox = (cw - w) // 2
-    oy = (ch - h) // 2
-
-    # 居中贴入画布（透明背景）
-    canvas = Image.new("RGBA", (cw, ch), (0, 0, 0, 0))
-    canvas.paste(im, (ox, oy))
-
-    # 生成 mask：白=可编辑，黑=不可编辑（若你的 API 语义相反，就把颜色反过来）
-    mask = Image.new("L", (cw, ch), 0)
-    mask.paste(255, (ox, oy, ox+w, oy +h))
-
-    cb = io.BytesIO(); canvas.save(cb, "PNG"); cb.seek(0)
-    mb = io.BytesIO(); mask.save(mb, "PNG");   mb.seek(0)
-    return cb.getvalue(), (w, h), (ox, oy)
-
-def inner_feather_alpha(w: int, h: int, feather_px: int) -> np.ndarray:
-    """返回 HxW 的 0..255 uint8 alpha，仅向内衰减，不越界"""
-    if feather_px <= 0:
-        return np.full((h, w), 255, np.uint8)
-    yy, xx = np.ogrid[:h, :w]
-    d = np.minimum.reduce([xx, w-1-xx, yy, h-1-yy]).astype(np.float32)
-    a = np.clip(d / feather_px, 0, 1)
-    return (a * 255).astype(np.uint8)
-
-def make_rgba_with_inner_feather(patch_png_bytes: bytes, feather_px: int) -> bytes:
-    """把 AI 返回的 patch（PNG）转为 BGRA，并叠加向内羽化的 alpha；返回 PNG 字节"""
-    arr = np.frombuffer(patch_png_bytes, np.uint8)
-    img = cv2.imdecode(arr, cv2.IMREAD_UNCHANGED)  # BGR 或 BGRA
-    if img is None:
-        raise RuntimeError("decode patch failed")
-
-    h, w = img.shape[:2]
-    # 统一到4通道
-    if img.shape[2] == 3:
-        bgr = img
-        a = inner_feather_alpha(w, h, feather_px)
-        bgra = np.dstack([bgr, a])
-    else:
-        bgr = img[..., :3]
-        a0  = img[..., 3]
-        a1  = inner_feather_alpha(w, h, feather_px)
-        a   = cv2.min(a0, a1)  # 不改变已有透明度，向内再收一层
-        bgra = np.dstack([bgr, a])
-
-    ok, enc = cv2.imencode(".png", bgra)
-    if not ok:
-        raise RuntimeError("encode patch failed")
-    return enc.tobytes()
-
-def crop_back_center_bytes(png_bytes: bytes, roi_wh: tuple[int,int], offset: tuple[int,int]):
-    im = Image.open(io.BytesIO(png_bytes))
-    cw, ch = CANVAS_W, CANVAS_H
-    # 若返回不是 1152×864，只做裁/贴到该尺寸（不要 resize）
-    if im.size != (cw, ch):
-        if im.width >= cw and im.height >= ch:
-            im = im.crop((0, 0, cw, ch))
-        else:
-            c = Image.new(im.mode, (cw, ch))
-            c.paste(im, (0, 0))
-            im = c
-
-    w, h = roi_wh
-    ox, oy = offset
-    patch = im.crop((ox, oy, ox + w, oy + h))
-    b = io.BytesIO(); patch.save(b, "PNG"); b.seek(0)
-    return b.getvalue()
-
-def _inner_feather_alpha_cv(h: int, w: int, feather_px: int) -> np.ndarray:
-    """
-    生成二维 (h, w) 的 uint8 alpha，仅向内羽化；feather_px<=0 时全不透明。
-    采用“先 X 再 Y”的广播，避免 reduce 导致的对象数组。
-    """
-    if feather_px is None or feather_px <= 0:
-        return np.full((h, w), 255, np.uint8)
-
-    # X 方向到左右边的最小距离 -> 形状 (1, w)
-    x = np.arange(w, dtype=np.int32)
-    dx = np.minimum(x, w - 1 - x)[None, :]          # (1, w)
-
-    # Y 方向到上下边的最小距离 -> 形状 (h, 1)
-    y = np.arange(h, dtype=np.int32)
-    dy = np.minimum(y, h - 1 - y)[:, None]          # (h, 1)
-
-    # 广播成 (h, w)，再归一化到 0..255
-    d = np.minimum(dx.astype(np.float32), dy.astype(np.float32))  # (h, w)
-    a = np.clip(d / float(feather_px), 0.0, 1.0)
-    return (a * 255.0).astype(np.uint8)             # (h, w)
-
-
-def make_rgba_with_inner_feather_safe(patch_png_bytes: bytes,
-                                      feather_px: int = 8,
-                                      clamp_existing_alpha: bool = True) -> bytes:
-    """
-    输入：AI 返回的 patch（PNG 字节，可能是灰度/BGR/BGRA）
-    输出：带“向内羽化 alpha”的 BGRA PNG 字节（几何尺寸不变）
-    """
-    # —— 解码 —— #
-    arr = np.frombuffer(patch_png_bytes, np.uint8)
-    img = cv2.imdecode(arr, cv2.IMREAD_UNCHANGED)
-    if img is None:
-        raise RuntimeError("decode patch failed")
-
-    # 灰度->BGR；确保是 (h,w,3/4)
-    if img.ndim == 2:
-        img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
-    if img.ndim != 3 or img.shape[2] not in (3, 4):
-        raise RuntimeError(f"unexpected image shape: {img.shape}")
-
-    h, w = img.shape[:2]
-    # —— 生成二维 alpha —— #
-    a_inner = _inner_feather_alpha_cv(h, w, feather_px)      # (h, w) uint8
-
-    # —— 拆通道 + 合并（避免 dstack/array 导致的形状不一致）—— #
-    if img.shape[2] == 3:
-        b, g, r = cv2.split(img)                             # (h, w) each
-        alpha = a_inner
-    else:
-        b, g, r, a0 = cv2.split(img)                         # (h, w) each
-        alpha = cv2.min(a0, a_inner) if clamp_existing_alpha else a_inner
-
-    # 连续内存 + uint8
-    b = np.ascontiguousarray(b, dtype=np.uint8)
-    g = np.ascontiguousarray(g, dtype=np.uint8)
-    r = np.ascontiguousarray(r, dtype=np.uint8)
-    alpha = np.ascontiguousarray(alpha, dtype=np.uint8)
-
-    # 最终 BGRA
-    bgra = cv2.merge((b, g, r, alpha))                       # (h, w, 4)
-
-    ok, enc = cv2.imencode(".png", bgra)
-    if not ok:
-        raise RuntimeError("encode patch failed")
-    return enc.tobytes()
-
-def sanitize_png_pillow(png_bytes: bytes, keep_dpi=True) -> bytes:
-    im = Image.open(io.BytesIO(png_bytes))
-    params = {}
-    if keep_dpi and "dpi" in im.info:
-        params["dpi"] = im.info["dpi"]
-    # 不传 exif/pnginfo，Pillow 不会写 eXIf
-    bio = io.BytesIO()
-    im.save(bio, "PNG", **params)
-    return bio.getvalue()
-
 def _imread_any(path: str, flags=cv2.IMREAD_UNCHANGED):
     """稳读任意路径（含中文/空格/长路径）"""
     try:
@@ -394,9 +238,21 @@ class ImageEditRequester:
             ('image', ('input.png', io.BytesIO(self.image_bytes), 'image/png'))
         ]
         prop = (
-            "仅在中心贴入的目标区域内进行修改；其他区域保持像素级完全不变。"
-            "禁止移动/缩放/旋转/裁剪/全局调色或风格化，输出分辨率与输入一致。"
-            f"{self.prompt}；边界需与周围自然过渡，避免边框/光晕/色阶跳变。"
+            "任务前提："
+            "1.我从一张大图中截取了部分图形，需要处理后再贴回去;"
+            "2.我将截取的图形放到了1152*864的区域中间，环绕的是像素值为(0, 0, 0, 0)部分;"
+            "3.我计算了中间区域的坐标和宽高，得到图片后，我将直接从截取内容;"
+
+            "要求："
+            "1.**仅修改**中间部分透明度不为0的区域，其余部分修改为黑色(0, 0, 0);"
+            "2.禁止向外羽化;"
+            "3.禁止修改编辑区域位置;"
+            "4.禁止更改编辑区域大小;"
+            "5.编辑区域的边缘部分保持不变,仅修改必要部分;"
+            "6.尽量不改变图中的几何信息;"
+            
+            "任务内容："
+            f"{self.prompt}；"
         )
         payload = {
             'model': self.MODEL,
@@ -2334,14 +2190,7 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
                 continue
 
             # 左上角锚点（自然像素）
-            l  = int(math.floor(d.x))
-            t  = int(math.floor(d.y))
-            iw = int(math.ceil(d.x + d.width)  - math.floor(d.x))
-            ih = int(math.ceil(d.y + d.height) - math.floor(d.y))
-
-            # 若 AI 回图尺寸有变，强制还原到期望尺寸（无缩放需求建议用最近邻）
-            if small.shape[1] != iw or small.shape[0] != ih:
-                small = cv2.resize(small, (iw, ih), interpolation=cv2.INTER_NEAREST)
+            l, t, iw, ih = _quantize_roi(d.x, d.y, d.width, d.height, W, H)
 
             if d.section == 'up':
                 _alpha_paste_no_resize_cv(small, up_img, l, t)
@@ -2400,7 +2249,108 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
 
         compose_pin_layout(o, u, d, out_path, margin=margin, gap=gap, bg_bgr=(255, 255, 255))
 
-    
+def _round_half_up(x: float) -> int:
+    # 与 round() 的 bankers rounding 不同，这里 0.5 -> 1，1.5 -> 2，更稳定
+    return int(math.floor(x + 0.5))
+
+def _quantize_roi(x: float, y: float, w: float, h: float, W: int, H: int):
+    l = max(0, min(W-1, _round_half_up(x)))
+    t = max(0, min(H-1, _round_half_up(y)))
+    qw = max(1, min(W - l, _round_half_up(w)))
+    qh = max(1, min(H - t, _round_half_up(h)))
+    return l, t, qw, qh
+
+def scale_and_fill_ai_image(ai_image: QtGui.QImage, target_width: int, target_height: int) -> QtGui.QImage:
+    """
+    将 AI 返回的图像缩放到目标区域，并填充到指定大小的画布上。
+    保持 AI 图像的宽高比，填充空白区域（背景色为黑色）。
+    """
+    # 获取 AI 图像的原始宽高
+    ai_width, ai_height = ai_image.width(), ai_image.height()
+
+    # 计算缩放比例，保持宽高比
+    scale_width = target_width / ai_width
+    scale_height = target_height / ai_height
+    scale_factor = min(scale_width, scale_height)  # 选择较小的缩放比例
+
+    # 缩放 AI 图像
+    scaled_ai_image = ai_image.scaled(ai_width * scale_factor, ai_height * scale_factor, 
+                                      QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation)
+
+    # 创建一个目标画布（填充背景色：黑色）
+    canvas = QtGui.QImage(target_width, target_height, QtGui.QImage.Format_ARGB32)
+    canvas.fill(QtGui.QColor(0, 0, 0, 0))  # 黑色背景，透明
+
+    # 计算将缩放后的图像放置到画布上的位置（居中）
+    x_offset = (target_width - scaled_ai_image.width()) // 2
+    y_offset = (target_height - scaled_ai_image.height()) // 2
+
+    # 创建 QPainter 进行绘制
+    painter = QtGui.QPainter(canvas)
+    painter.drawImage(x_offset, y_offset, scaled_ai_image)  # 将图像绘制到目标位置
+    painter.end()
+
+    return canvas
+
+# 自动去黑边裁切（从AI返回图像提取中间部分）
+def auto_crop_nonblack_qimage(ai_png_bytes: bytes, thr: int = 8, pad: int = 0, edge_size: int = 5) -> QtGui.QImage:
+    # 从字节数据加载图像并转换为 RGBA 格式
+    img = QtGui.QImage.fromData(ai_png_bytes).convertToFormat(QtGui.QImage.Format_RGBA8888)
+    h, w = img.height(), img.width()
+
+    # 使用 QImage 获取图像的原始 RGBA 数据
+    arr = np.array(img.bits()).reshape(h, w, 4)  # 转换为 (h, w, 4) 的 NumPy 数组
+
+    # 创建一个掩码，标记非黑的区域（阈值大于 thr 且 alpha 大于 8）
+    mask = ((arr[..., :3] > thr).any(axis=2)) & (arr[..., 3] > 8)
+
+    # 获取非黑区域的坐标
+    ys, xs = np.where(mask)
+
+    if xs.size == 0:
+        # 如果没有找到非黑区域，返回原图
+        return img
+
+    # 计算非黑区域的边界，并加上 padding
+    x1, x2 = xs.min(), xs.max()
+    y1, y2 = ys.min(), ys.max()
+    x1 = max(0, x1 - pad)
+    y1 = max(0, y1 - pad)
+    x2 = min(w - 1, x2 + pad)
+    y2 = min(h - 1, y2 + pad)
+
+    # 从原始图像中裁剪出目标区域
+    img_cropped = img.copy(x1, y1, x2 - x1 + 1, y2 - y1 + 1)
+
+    # 获取裁剪后的图像数据
+    cropped_arr = np.array(img_cropped.bits()).reshape(img_cropped.height(), img_cropped.width(), 4)
+
+    # 设置边缘5像素区域的透明度为0
+    # 左右边缘
+    cropped_arr[:, :edge_size, 3] = 0  # 左边缘
+    cropped_arr[:, -edge_size:, 3] = 0  # 右边缘
+    # 上下边缘
+    cropped_arr[:edge_size, :, 3] = 0  # 上边缘
+    cropped_arr[-edge_size:, :, 3] = 0  # 下边缘
+
+    # 创建一个 QImage 以便后续处理
+    result_img = QtGui.QImage(cropped_arr.data, cropped_arr.shape[1], cropped_arr.shape[0], cropped_arr.strides[0], QtGui.QImage.Format_RGBA8888)
+
+    return result_img
+
+
+# 居中贴入，保持原图比例，填充透明边
+def fit_into_roi_no_distort(patch: QtGui.QImage, roi_w: int, roi_h: int) -> QtGui.QImage:
+    dst = QtGui.QImage(roi_w, roi_h, QtGui.QImage.Format_ARGB32)
+    dst.fill(QtCore.Qt.transparent)
+    scaled = patch.scaled(roi_w, roi_h, QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation)
+    px = (roi_w - scaled.width()) // 2
+    py = (roi_h - scaled.height()) // 2
+    p = QtGui.QPainter(dst)
+    p.setRenderHint(QtGui.QPainter.SmoothPixmapTransform, True)
+    p.drawImage(px, py, scaled)
+    p.end()
+    return dst
 
 class AIWorker(QtCore.QObject):
     progressed = QtCore.Signal(int, int)  # step, total
@@ -2428,61 +2378,53 @@ class AIWorker(QtCore.QObject):
             step = 0
             for idx in self.target_indices:
                 d = self.differences[idx - 1]
-                # 裁剪并调用AI
-                # 左上角取 floor；右下角取 ceil；宽高为开区间差
-                l = int(math.floor(d.x))
-                t = int(math.floor(d.y))
-                r = int(math.ceil(d.x + d.width))
-                b = int(math.ceil(d.y + d.height))
-
-                # 与大图范围相交（开区间），同时保证 l<t<r<b
-                l = max(0, min(l, W))
-                t = max(0, min(t, H))
-                r = max(0, min(r, W))
-                b = max(0, min(b, H))
-                if r <= l or b <= t:
-                    step += 1
-                    self.progressed.emit(step, total)
-                    continue
-
-                w = r - l
-                h = b - t
+                l, t, w, h = _quantize_roi(d.x, d.y, d.width, d.height, W, H)
                 rect = QtCore.QRect(l, t, w, h)
-                subimg = img.copy(rect)
+                subimg = img.copy(rect)  # 裁剪原图
+                origin_path = os.path.join(self.level_dir, f"rect_{idx}.png")
+                subimg.save(origin_path)
+
+                # 创建一个透明背景的画布 (1152x864)
+                canvas = QtGui.QImage(CANVAS_W, CANVAS_H, QtGui.QImage.Format_ARGB32)
+                canvas.fill(QtGui.QColor(0, 0, 0, 0))  # 填充透明背景
+
+                # 居中偏移
+                ox = (CANVAS_W - w) // 2
+                oy = (CANVAS_H - h) // 2
+
+                # 使用 QPainter 将原图绘制到大画布上
+                painter = QtGui.QPainter(canvas)
+                painter.drawImage(ox, oy, subimg)
+                painter.end()
+
+                # 保存合成后的图像
+                expand_path = os.path.join(self.level_dir, f"expand_{idx}.png")
+                canvas.save(expand_path)
+
                 buf = QtCore.QBuffer()
                 buf.open(QtCore.QIODevice.ReadWrite)
-                subimg.save(buf, "PNG")                 # 编码到内存
+                canvas.save(buf, "PNG")                 # 编码到内存
                 png_bytes = bytes(buf.data())           # 转成 Python bytes
                 buf.close()
 
-                # path = os.path.join(self.level_dir,  f"rect_{idx}.png")
-                # with open(path, "wb") as f:
-                #     f.write(png_bytes)
+                req = ImageEditRequester("input", png_bytes, d.label)
+                # 获取 AI 返回的图像字节
+                img_bytes = req.send_request()  # 通过 ImageEditRequester 获取图像字节
+                im = QtGui.QImage()
+                im.loadFromData(img_bytes)  # 从字节数据加载图片
+                ai_path = os.path.join(self.level_dir, f"patch_{idx}.png")
+                im.save(ai_path)
 
-                # 1) 打包到 1152x864 左上角
-                canvas_bytes, (w, h), (ox, oy) = pack_center_with_mask_bytes(png_bytes, feather=0)
-
-                # path = os.path.join(self.level_dir,  f"expand_{idx}.png")
-                # with open(path, "wb") as f:
-                #     f.write(canvas_bytes)
-
-                req = ImageEditRequester("input", canvas_bytes, (d.label or '').strip())
-                out_bytes = sanitize_png_pillow(req.send_request())
-
-                # path = os.path.join(self.level_dir, f"out_{idx}.png")
-                # with open(path, "wb") as f:
-                #     f.write(out_bytes)
-
-                patch_bytes = crop_back_center_bytes(out_bytes, (w, h), (ox, oy))
-
-                # path = os.path.join(self.level_dir, f"patch_{idx}.png")
-                # with open(path, "wb") as f:
-                #     f.write(patch_bytes)
-                # 加“向内羽化”生成 RGBA
-                patch_rgba_bytes = make_rgba_with_inner_feather_safe(patch_bytes, feather_px=8)
-                dst = os.path.join(self.level_dir, f'region{idx}.png')
-                with open(dst, 'wb') as f:
-                    f.write(patch_rgba_bytes)
+                patch_qimg = auto_crop_nonblack_qimage(img_bytes, thr=8, pad=0)  # 自动去黑边
+                nonbloack_path = os.path.join(self.level_dir, f"white{idx}.png")
+                patch_qimg.save(nonbloack_path)
+                # final_image = scale_and_fill_ai_image(im, CANVAS_W, CANVAS_H)
+                patch_qimg = fit_into_roi_no_distort(patch_qimg, w, h)
+                # 保存 AI 返回的图像
+                final_path = os.path.join(self.level_dir, f"region{idx}.png")
+                patch_qimg.save(final_path)
+                # im.copy(ox, oy, w, h).save(final_path)
+                # final_image.save(final_path)
                 step += 1
                 self.progressed.emit(step, total)
             # compute failures: region files not present
