@@ -55,30 +55,77 @@ def now_id() -> str:
     return str(int(time.time() * 1000))
 
 
-def rect_points(diff: Difference) -> List[QtCore.QPointF]:
-    return [
-        QtCore.QPointF(diff.x, diff.y),
-        QtCore.QPointF(diff.x + diff.width, diff.y),
-        QtCore.QPointF(diff.x + diff.width, diff.y + diff.height),
-        QtCore.QPointF(diff.x, diff.y + diff.height),
-    ]
+def _round_half_up(x: float) -> int:
+    # 与 round() 的 bankers rounding 不同，这里 0.5 -> 1，1.5 -> 2，更稳定
+    return int(math.floor(x + 0.5))
+
+def _quantize_roi(x: float, y: float, w: float, h: float, W: int, H: int):
+    l = max(0, min(W-1, _round_half_up(x)))
+    t = max(0, min(H-1, _round_half_up(y)))
+    qw = max(1, min(W - l, _round_half_up(w)))
+    qh = max(1, min(H - t, _round_half_up(h)))
+    return l, t, qw, qh
+
+# 自动去黑边裁切（从AI返回图像提取中间部分）
+def auto_crop_nonblack_qimage(ai_png_bytes: bytes, thr: int = 8, pad: int = 0, edge_size: int = 5) -> QtGui.QImage:
+    # 从字节数据加载图像并转换为 RGBA 格式
+    img = QtGui.QImage.fromData(ai_png_bytes).convertToFormat(QtGui.QImage.Format_RGBA8888)
+    h, w = img.height(), img.width()
+
+    # 使用 QImage 获取图像的原始 RGBA 数据
+    arr = np.array(img.bits()).reshape(h, w, 4)  # 转换为 (h, w, 4) 的 NumPy 数组
+
+    # 创建一个掩码，标记非黑的区域（阈值大于 thr 且 alpha 大于 8）
+    mask = ((arr[..., :3] > thr).any(axis=2)) & (arr[..., 3] > 8)
+
+    # 获取非黑区域的坐标
+    ys, xs = np.where(mask)
+
+    if xs.size == 0:
+        # 如果没有找到非黑区域，返回原图
+        return img
+
+    # 计算非黑区域的边界，并加上 padding
+    x1, x2 = xs.min(), xs.max()
+    y1, y2 = ys.min(), ys.max()
+    x1 = max(0, x1 - pad)
+    y1 = max(0, y1 - pad)
+    x2 = min(w - 1, x2 + pad)
+    y2 = min(h - 1, y2 + pad)
+
+    # 从原始图像中裁剪出目标区域
+    img_cropped = img.copy(x1, y1, x2 - x1 + 1, y2 - y1 + 1)
+
+    # 获取裁剪后的图像数据
+    cropped_arr = np.array(img_cropped.bits()).reshape(img_cropped.height(), img_cropped.width(), 4)
+
+    # 设置边缘5像素区域的透明度为0
+    # 左右边缘
+    cropped_arr[:, :edge_size, 3] = 0  # 左边缘
+    cropped_arr[:, -edge_size:, 3] = 0  # 右边缘
+    # 上下边缘
+    cropped_arr[:edge_size, :, 3] = 0  # 上边缘
+    cropped_arr[-edge_size:, :, 3] = 0  # 下边缘
+
+    # 创建一个 QImage 以便后续处理
+    result_img = QtGui.QImage(cropped_arr.data, cropped_arr.shape[1], cropped_arr.shape[0], cropped_arr.strides[0], QtGui.QImage.Format_RGBA8888)
+
+    return result_img
 
 
-def bounding_rect(points: List[QtCore.QPointF]) -> QtCore.QRectF:
-    xs = [p.x() for p in points]
-    ys = [p.y() for p in points]
-    min_x, max_x = min(xs), max(xs)
-    min_y, max_y = min(ys), max(ys)
-    return QtCore.QRectF(min_x, min_y, max_x - min_x, max_y - min_y)
+# 居中贴入，保持原图比例，填充透明边
+def fit_into_roi_no_distort(patch: QtGui.QImage, roi_w: int, roi_h: int) -> QtGui.QImage:
+    dst = QtGui.QImage(roi_w, roi_h, QtGui.QImage.Format_ARGB32)
+    dst.fill(QtCore.Qt.transparent)
+    scaled = patch.scaled(roi_w, roi_h, QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation)
+    px = (roi_w - scaled.width()) // 2
+    py = (roi_h - scaled.height()) // 2
+    p = QtGui.QPainter(dst)
+    p.setRenderHint(QtGui.QPainter.SmoothPixmapTransform, True)
+    p.drawImage(px, py, scaled)
+    p.end()
+    return dst
 
-
-def overlap_ratio(a: QtCore.QRectF, b: QtCore.QRectF) -> float:
-    inter = a.intersected(b)
-    if inter.isNull():
-        return 0.0
-    inter_area = max(0.0, inter.width()) * max(0.0, inter.height())
-    min_area = max(1.0, min(a.width() * a.height(), b.width() * b.height()))
-    return inter_area / min_area
 
 def _alpha_paste_no_resize_cv(src: np.ndarray, dst: np.ndarray, x: int, y: int) -> None:
     """
@@ -244,10 +291,10 @@ class ImageEditRequester:
             "3.我计算了中间区域的坐标和宽高，得到图片后，我将直接从截取内容;"
 
             "要求："
-            "1.**仅修改**中间部分透明度不为0的区域，其余部分修改为黑色(0, 0, 0);"
-            "2.禁止向外羽化;"
-            "3.禁止修改编辑区域位置;"
-            "4.禁止更改编辑区域大小;"
+            "1.**仅修改**中间部分透明度不为0的区域，其余部分修改为黑色(0, 0, 0)，**禁止**生成模拟透明度为0的背景;"
+            "2.**禁止**向外羽化;"
+            "3.**禁止**修改编辑区域位置;"
+            "4.**禁止**更改编辑区域大小;"
             "5.编辑区域的边缘部分保持不变,仅修改必要部分;"
             "6.尽量不改变图中的几何信息;"
             
@@ -1648,7 +1695,8 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
             self._remove_ai_overlays()
 
     def ai_result_path(self, index: int) -> str:
-        return os.path.join(self.level_dir(), f"region{index}.png")
+        file_name = os.path.splitext(os.path.basename(self.pair.up_image_path))[0]
+        return os.path.join(self.level_dir(), f"{file_name}_region{index}.png")
     
     def _enable_ai_overlays(self) -> None:
         self.ai_overlays_up.setVisible(True)
@@ -1814,9 +1862,11 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
         # 状态栏进度
         self._ai_progress_start(len(targets))
 
+        file_name = os.path.splitext(os.path.basename(self.pair.up_image_path))[0]
+
         # 后台线程
         self._ai_thread = QtCore.QThread(self)
-        self._ai_worker = AIWorker(level_dir, origin, self.differences, targets)
+        self._ai_worker = AIWorker(level_dir, origin, file_name, self.differences, targets)
         self._ai_worker.moveToThread(self._ai_thread)
         self._ai_thread.started.connect(self._ai_worker.run)
         # Ensure slots execute on GUI thread
@@ -1850,6 +1900,8 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
     def save_config(self, show_message: bool = True) -> None:
         self._write_config_snapshot()
 
+        file_name = os.path.splitext(os.path.basename(self.pair.up_image_path))[0]
+        file_ext = os.path.splitext(os.path.basename(self.pair.up_image_path))[1]
         # copy original image into level dir and rename as origin.{ext}
         try:
             src_img = self.pair.up_image_path
@@ -1857,7 +1909,7 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
                 _, ext = os.path.splitext(src_img)
                 if not ext:
                     ext = '.png'
-                dst_img = os.path.join(self.level_dir(), f'origin{ext}')
+                dst_img = os.path.join(self.level_dir(), f'{file_name}_origin{file_ext}')
                 if not os.path.exists(dst_img):
                     shutil.copy2(src_img, dst_img)
         except Exception:
@@ -1881,11 +1933,16 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
         def to_percent_x(x_px: float) -> float:
             return x_px / w
 
+        file_name = os.path.splitext(os.path.basename(self.pair.up_image_path))[0]
+        file_ext = os.path.splitext(os.path.basename(self.pair.up_image_path))[1]
         data = {
+            "imageName": f"{file_name}_origin{file_ext}",
+            "imageWidth":int(self.up_scene.width()),
+            "imageHeight": int(self.up_scene.height()),
             "differenceCount": len(self.differences),
             "differences": []
         }
-        for d in self.differences:
+        for idx, d in enumerate(self.differences):
             points = [
                 {"x": to_percent_x(d.x), "y": to_percent_y_bottom(d.y)},
                 {"x": to_percent_x(d.x + d.width), "y": to_percent_y_bottom(d.y)},
@@ -1910,11 +1967,12 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
                 "section": ('down' if d.section == 'down' else 'up'),
                 "category": d.category or "",
                 "label": d.label or "",
+                "replaceImage":f"{file_name}_region{idx+1}.png",
                 "enabled": bool(d.enabled),
                 "points": points,
                 "hintLevel": int(lvl),
                 "circleCenter": {"x": cx, "y": cy},
-                "circleRadius": radius
+                "circleRadius": radius,
             })
 
         os.makedirs(self.level_dir(), exist_ok=True)
@@ -2163,11 +2221,12 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
         # 1) 找 origin
         level_dir = self.level_dir()
         origin_path = None
-        for ext in ['.png', '.jpg', '.jpeg']:
-            p = os.path.join(level_dir, f'origin{ext}')
-            if os.path.isfile(p):
-                origin_path = p
-                break
+        file_name = os.path.splitext(os.path.basename(self.pair.up_image_path))[0]
+        file_ext = os.path.splitext(os.path.basename(self.pair.up_image_path))[1]
+
+        p = os.path.join(level_dir, f'{file_name}_origin{file_ext}')
+        if os.path.isfile(p):
+            origin_path = p
         if origin_path is None:
             origin_path = self.pair.up_image_path  # 兜底
 
@@ -2249,120 +2308,19 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
 
         compose_pin_layout(o, u, d, out_path, margin=margin, gap=gap, bg_bgr=(255, 255, 255))
 
-def _round_half_up(x: float) -> int:
-    # 与 round() 的 bankers rounding 不同，这里 0.5 -> 1，1.5 -> 2，更稳定
-    return int(math.floor(x + 0.5))
-
-def _quantize_roi(x: float, y: float, w: float, h: float, W: int, H: int):
-    l = max(0, min(W-1, _round_half_up(x)))
-    t = max(0, min(H-1, _round_half_up(y)))
-    qw = max(1, min(W - l, _round_half_up(w)))
-    qh = max(1, min(H - t, _round_half_up(h)))
-    return l, t, qw, qh
-
-def scale_and_fill_ai_image(ai_image: QtGui.QImage, target_width: int, target_height: int) -> QtGui.QImage:
-    """
-    将 AI 返回的图像缩放到目标区域，并填充到指定大小的画布上。
-    保持 AI 图像的宽高比，填充空白区域（背景色为黑色）。
-    """
-    # 获取 AI 图像的原始宽高
-    ai_width, ai_height = ai_image.width(), ai_image.height()
-
-    # 计算缩放比例，保持宽高比
-    scale_width = target_width / ai_width
-    scale_height = target_height / ai_height
-    scale_factor = min(scale_width, scale_height)  # 选择较小的缩放比例
-
-    # 缩放 AI 图像
-    scaled_ai_image = ai_image.scaled(ai_width * scale_factor, ai_height * scale_factor, 
-                                      QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation)
-
-    # 创建一个目标画布（填充背景色：黑色）
-    canvas = QtGui.QImage(target_width, target_height, QtGui.QImage.Format_ARGB32)
-    canvas.fill(QtGui.QColor(0, 0, 0, 0))  # 黑色背景，透明
-
-    # 计算将缩放后的图像放置到画布上的位置（居中）
-    x_offset = (target_width - scaled_ai_image.width()) // 2
-    y_offset = (target_height - scaled_ai_image.height()) // 2
-
-    # 创建 QPainter 进行绘制
-    painter = QtGui.QPainter(canvas)
-    painter.drawImage(x_offset, y_offset, scaled_ai_image)  # 将图像绘制到目标位置
-    painter.end()
-
-    return canvas
-
-# 自动去黑边裁切（从AI返回图像提取中间部分）
-def auto_crop_nonblack_qimage(ai_png_bytes: bytes, thr: int = 8, pad: int = 0, edge_size: int = 5) -> QtGui.QImage:
-    # 从字节数据加载图像并转换为 RGBA 格式
-    img = QtGui.QImage.fromData(ai_png_bytes).convertToFormat(QtGui.QImage.Format_RGBA8888)
-    h, w = img.height(), img.width()
-
-    # 使用 QImage 获取图像的原始 RGBA 数据
-    arr = np.array(img.bits()).reshape(h, w, 4)  # 转换为 (h, w, 4) 的 NumPy 数组
-
-    # 创建一个掩码，标记非黑的区域（阈值大于 thr 且 alpha 大于 8）
-    mask = ((arr[..., :3] > thr).any(axis=2)) & (arr[..., 3] > 8)
-
-    # 获取非黑区域的坐标
-    ys, xs = np.where(mask)
-
-    if xs.size == 0:
-        # 如果没有找到非黑区域，返回原图
-        return img
-
-    # 计算非黑区域的边界，并加上 padding
-    x1, x2 = xs.min(), xs.max()
-    y1, y2 = ys.min(), ys.max()
-    x1 = max(0, x1 - pad)
-    y1 = max(0, y1 - pad)
-    x2 = min(w - 1, x2 + pad)
-    y2 = min(h - 1, y2 + pad)
-
-    # 从原始图像中裁剪出目标区域
-    img_cropped = img.copy(x1, y1, x2 - x1 + 1, y2 - y1 + 1)
-
-    # 获取裁剪后的图像数据
-    cropped_arr = np.array(img_cropped.bits()).reshape(img_cropped.height(), img_cropped.width(), 4)
-
-    # 设置边缘5像素区域的透明度为0
-    # 左右边缘
-    cropped_arr[:, :edge_size, 3] = 0  # 左边缘
-    cropped_arr[:, -edge_size:, 3] = 0  # 右边缘
-    # 上下边缘
-    cropped_arr[:edge_size, :, 3] = 0  # 上边缘
-    cropped_arr[-edge_size:, :, 3] = 0  # 下边缘
-
-    # 创建一个 QImage 以便后续处理
-    result_img = QtGui.QImage(cropped_arr.data, cropped_arr.shape[1], cropped_arr.shape[0], cropped_arr.strides[0], QtGui.QImage.Format_RGBA8888)
-
-    return result_img
-
-
-# 居中贴入，保持原图比例，填充透明边
-def fit_into_roi_no_distort(patch: QtGui.QImage, roi_w: int, roi_h: int) -> QtGui.QImage:
-    dst = QtGui.QImage(roi_w, roi_h, QtGui.QImage.Format_ARGB32)
-    dst.fill(QtCore.Qt.transparent)
-    scaled = patch.scaled(roi_w, roi_h, QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation)
-    px = (roi_w - scaled.width()) // 2
-    py = (roi_h - scaled.height()) // 2
-    p = QtGui.QPainter(dst)
-    p.setRenderHint(QtGui.QPainter.SmoothPixmapTransform, True)
-    p.drawImage(px, py, scaled)
-    p.end()
-    return dst
 
 class AIWorker(QtCore.QObject):
     progressed = QtCore.Signal(int, int)  # step, total
     finished = QtCore.Signal(list)        # failed indices
     error = QtCore.Signal(str)
 
-    def __init__(self, level_dir: str, origin_path: str, differences: List[Difference], target_indices: List[int]):
+    def __init__(self, level_dir: str, origin_path: str, prefex: str, differences: List[Difference], target_indices: List[int]):
         super().__init__()
         self.level_dir = level_dir
         self.origin_path = origin_path
         self.differences = differences
         self.target_indices = target_indices
+        self.prepex = prefex
 
     @QtCore.Slot()
     def run(self) -> None:
@@ -2381,8 +2339,6 @@ class AIWorker(QtCore.QObject):
                 l, t, w, h = _quantize_roi(d.x, d.y, d.width, d.height, W, H)
                 rect = QtCore.QRect(l, t, w, h)
                 subimg = img.copy(rect)  # 裁剪原图
-                origin_path = os.path.join(self.level_dir, f"rect_{idx}.png")
-                subimg.save(origin_path)
 
                 # 创建一个透明背景的画布 (1152x864)
                 canvas = QtGui.QImage(CANVAS_W, CANVAS_H, QtGui.QImage.Format_ARGB32)
@@ -2397,10 +2353,6 @@ class AIWorker(QtCore.QObject):
                 painter.drawImage(ox, oy, subimg)
                 painter.end()
 
-                # 保存合成后的图像
-                expand_path = os.path.join(self.level_dir, f"expand_{idx}.png")
-                canvas.save(expand_path)
-
                 buf = QtCore.QBuffer()
                 buf.open(QtCore.QIODevice.ReadWrite)
                 canvas.save(buf, "PNG")                 # 编码到内存
@@ -2409,28 +2361,21 @@ class AIWorker(QtCore.QObject):
 
                 req = ImageEditRequester("input", png_bytes, d.label)
                 # 获取 AI 返回的图像字节
-                img_bytes = req.send_request()  # 通过 ImageEditRequester 获取图像字节
-                im = QtGui.QImage()
-                im.loadFromData(img_bytes)  # 从字节数据加载图片
-                ai_path = os.path.join(self.level_dir, f"patch_{idx}.png")
-                im.save(ai_path)
+                img_bytes = req.send_request()
 
                 patch_qimg = auto_crop_nonblack_qimage(img_bytes, thr=8, pad=0)  # 自动去黑边
-                nonbloack_path = os.path.join(self.level_dir, f"white{idx}.png")
-                patch_qimg.save(nonbloack_path)
-                # final_image = scale_and_fill_ai_image(im, CANVAS_W, CANVAS_H)
-                patch_qimg = fit_into_roi_no_distort(patch_qimg, w, h)
+
+                patch_qimg = fit_into_roi_no_distort(patch_qimg, w, h) #居中和调整大小
                 # 保存 AI 返回的图像
-                final_path = os.path.join(self.level_dir, f"region{idx}.png")
+                final_path = os.path.join(self.level_dir, f"{self.prepex}_region{idx}.png")
                 patch_qimg.save(final_path)
-                # im.copy(ox, oy, w, h).save(final_path)
-                # final_image.save(final_path)
+
                 step += 1
                 self.progressed.emit(step, total)
             # compute failures: region files not present
             failed = []
             for idx in self.target_indices:
-                dst = os.path.join(self.level_dir, f'region{idx}.png')
+                dst = os.path.join(self.level_dir, f"{self.origin_path}_region{idx}.png")
                 if not os.path.isfile(dst):
                     failed.append(idx)
             self.finished.emit(failed)
