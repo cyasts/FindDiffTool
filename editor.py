@@ -66,65 +66,79 @@ def _quantize_roi(x: float, y: float, w: float, h: float, W: int, H: int):
     qh = max(1, min(H - t, _round_half_up(h)))
     return l, t, qw, qh
 
-# 自动去黑边裁切（从AI返回图像提取中间部分）
-def auto_crop_nonblack_qimage(ai_png_bytes: bytes, thr: int = 8, pad: int = 0, edge_size: int = 5) -> QtGui.QImage:
-    # 从字节数据加载图像并转换为 RGBA 格式
-    img = QtGui.QImage.fromData(ai_png_bytes).convertToFormat(QtGui.QImage.Format_RGBA8888)
-    h, w = img.height(), img.width()
+def _make_rect_feather_alpha8(w: int, h: int, f: int) -> QtGui.QImage:
+    """生成矩形四周羽化的 Alpha8 掩膜，中心=255，边缘渐变到0"""
+    f = max(1, min(f, (w // 2) - 1 if w >= 4 else 1, (h // 2) - 1 if h >= 4 else 1))
+    alpha = QtGui.QImage(w, h, QtGui.QImage.Format_Alpha8)
+    alpha.fill(0)
 
-    # 使用 QImage 获取图像的原始 RGBA 数据
-    arr = np.array(img.bits()).reshape(h, w, 4)  # 转换为 (h, w, 4) 的 NumPy 数组
+    p = QtGui.QPainter(alpha)
+    p.setPen(QtCore.Qt.NoPen)
 
-    # 创建一个掩码，标记非黑的区域（阈值大于 thr 且 alpha 大于 8）
-    mask = ((arr[..., :3] > thr).any(axis=2)) & (arr[..., 3] > 8)
+    # 中心不透明
+    inner = QtCore.QRect(f, f, max(0, w - 2*f), max(0, h - 2*f))
+    if inner.width() > 0 and inner.height() > 0:
+        p.fillRect(inner, QtGui.QColor(0, 0, 0, 255))
 
-    # 获取非黑区域的坐标
-    ys, xs = np.where(mask)
+    # 四边线性渐变（在 Alpha8 下，颜色的 alpha 用作像素值）
+    # Top
+    g = QtGui.QLinearGradient(0, 0, 0, f)
+    g.setColorAt(0.0, QtGui.QColor(0, 0, 0, 0))
+    g.setColorAt(1.0, QtGui.QColor(0, 0, 0, 255))
+    p.fillRect(QtCore.QRect(0, 0, w, f), QtGui.QBrush(g))
+    # Bottom
+    g = QtGui.QLinearGradient(0, h - f, 0, h)
+    g.setColorAt(0.0, QtGui.QColor(0, 0, 0, 255))
+    g.setColorAt(1.0, QtGui.QColor(0, 0, 0, 0))
+    p.fillRect(QtCore.QRect(0, h - f, w, f), QtGui.QBrush(g))
+    # Left
+    g = QtGui.QLinearGradient(0, 0, f, 0)
+    g.setColorAt(0.0, QtGui.QColor(0, 0, 0, 0))
+    g.setColorAt(1.0, QtGui.QColor(0, 0, 0, 255))
+    p.fillRect(QtCore.QRect(0, 0, f, h), QtGui.QBrush(g))
+    # Right
+    g = QtGui.QLinearGradient(w - f, 0, w, 0)
+    g.setColorAt(0.0, QtGui.QColor(0, 0, 0, 255))
+    g.setColorAt(1.0, QtGui.QColor(0, 0, 0, 0))
+    p.fillRect(QtCore.QRect(w - f, 0, f, h), QtGui.QBrush(g))
 
-    if xs.size == 0:
-        # 如果没有找到非黑区域，返回原图
-        return img
+    # 四角径向渐变补齐
+    for cx, cy in ((f, f), (w - f, f), (f, h - f), (w - f, h - f)):
+        rg = QtGui.QRadialGradient(cx, cy, f)
+        rg.setColorAt(0.0, QtGui.QColor(0, 0, 0, 255))
+        rg.setColorAt(1.0, QtGui.QColor(0, 0, 0, 0))
+        p.setBrush(QtGui.QBrush(rg))
+        p.drawEllipse(QtCore.QRect(cx - f, cy - f, 2*f, 2*f))
 
-    # 计算非黑区域的边界，并加上 padding
-    x1, x2 = xs.min(), xs.max()
-    y1, y2 = ys.min(), ys.max()
-    x1 = max(0, x1 - pad)
-    y1 = max(0, y1 - pad)
-    x2 = min(w - 1, x2 + pad)
-    y2 = min(h - 1, y2 + pad)
-
-    # 从原始图像中裁剪出目标区域
-    img_cropped = img.copy(x1, y1, x2 - x1 + 1, y2 - y1 + 1)
-
-    # 获取裁剪后的图像数据
-    cropped_arr = np.array(img_cropped.bits()).reshape(img_cropped.height(), img_cropped.width(), 4)
-
-    # 设置边缘5像素区域的透明度为0
-    # 左右边缘
-    cropped_arr[:, :edge_size, 3] = 0  # 左边缘
-    cropped_arr[:, -edge_size:, 3] = 0  # 右边缘
-    # 上下边缘
-    cropped_arr[:edge_size, :, 3] = 0  # 上边缘
-    cropped_arr[-edge_size:, :, 3] = 0  # 下边缘
-
-    # 创建一个 QImage 以便后续处理
-    result_img = QtGui.QImage(cropped_arr.data, cropped_arr.shape[1], cropped_arr.shape[0], cropped_arr.strides[0], QtGui.QImage.Format_RGBA8888)
-
-    return result_img
-
-
-# 居中贴入，保持原图比例，填充透明边
-def fit_into_roi_no_distort(patch: QtGui.QImage, roi_w: int, roi_h: int) -> QtGui.QImage:
-    dst = QtGui.QImage(roi_w, roi_h, QtGui.QImage.Format_ARGB32)
-    dst.fill(QtCore.Qt.transparent)
-    scaled = patch.scaled(roi_w, roi_h, QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation)
-    px = (roi_w - scaled.width()) // 2
-    py = (roi_h - scaled.height()) // 2
-    p = QtGui.QPainter(dst)
-    p.setRenderHint(QtGui.QPainter.SmoothPixmapTransform, True)
-    p.drawImage(px, py, scaled)
     p.end()
-    return dst
+    return alpha
+
+
+def _apply_alpha_straight(patch: QtGui.QImage, alpha8: QtGui.QImage) -> QtGui.QImage:
+    """
+    只替换 Alpha 通道，RGB 不变（避免“发灰”）。
+    要求 patch 和 alpha8 同宽高。
+    """
+    w, h = patch.width(), patch.height()
+    # 使用非预乘格式，保证 RGB 不被乘暗
+    out = patch.convertToFormat(QtGui.QImage.Format_ARGB32)
+
+    # 逐像素写 alpha（简洁版，足够快，因为 ROI 一般不大）
+    for y in range(h):
+        a_ptr = alpha8.constScanLine(y)
+        # ARGB32 在小端内存是 BGRA 顺序
+        px = out.scanLine(y)
+        # 将 memoryview 转成 bytearray 便于写 alpha
+        row = bytearray(px)  # BGRA BGRA ...
+        arow = bytes(a_ptr)
+        # 每4字节一像素，把第4个字节(索引3)替换为 alpha
+        for x in range(w):
+            row[4*x + 3] = arow[x]
+        # 回写
+        mv = memoryview(px)
+        mv[:len(row)] = row
+
+    return out
 
 
 def _alpha_paste_no_resize_cv(src: np.ndarray, dst: np.ndarray, x: int, y: int) -> None:
@@ -2366,7 +2380,6 @@ class AIWorker(QtCore.QObject):
                 l, t, w, h = _quantize_roi(d.x, d.y, d.width, d.height, W, H)
                 rect = QtCore.QRect(l, t, w, h)
                 subimg = img.copy(rect)  # 裁剪原图
-                subimg.save(os.path.join(self.level_dir, f"rect{idx}.png"))
 
                 # 1) 输入图
                 canvas = QtGui.QImage(CANVAS_W, CANVAS_H, QtGui.QImage.Format_ARGB32)
@@ -2398,18 +2411,15 @@ class AIWorker(QtCore.QObject):
                 req = ImageEditRequester("input", png_bytes, mask_bytes, d.label)
                 # 获取 AI 返回的图像字节
                 img_bytes = req.send_request()
+                patch = QtGui.QImage.fromData(img_bytes).copy(ox, oy, w, h)
+                # 羽化宽度：短边的 6%（可按需调整/做成参数）
+                feather_px = max(4, int(min(w, h) * 0.06))
+                alpha8 = _make_rect_feather_alpha8(w, h, feather_px)
 
-                # out_img = QtGui.QImage.fromData(img_bytes)
-                # out_path = os.path.join(self.level_dir, f"out{idx}.png")
-                # out_img.save(out_path)
-
-                # patch_qimg = auto_crop_nonblack_qimage(img_bytes, thr=8, pad=0)  # 自动去黑边
-
-                # patch_qimg = fit_into_roi_no_distort(patch_qimg, w, h) #居中和调整大小
-                # # 保存 AI 返回的图像
+                # 直通 Alpha：避免预乘导致的整体泛灰
+                patch_feathered = _apply_alpha_straight(patch, alpha8)
                 final_path = os.path.join(self.level_dir, f"{self.prepex}_region{idx}.png")
-                # patch_qimg.save(final_path)
-                QtGui.QImage.fromData(img_bytes).copy(ox, oy, w, h).save(final_path)
+                patch_feathered.save(final_path)
 
                 step += 1
                 self.progressed.emit(step, total)
