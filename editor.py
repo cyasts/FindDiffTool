@@ -15,7 +15,7 @@ except Exception:  # pragma: no cover
 
 ENABLE_MOUSE : bool = True
 
-CANVAS_W, CANVAS_H = 1152, 864  # 4:3
+CANVAS_W, CANVAS_H = 1024, 1024  # 4:3
 
 CATEGORY_COLOR_MAP: Dict[str, QtGui.QColor] = {
     '情感': QtGui.QColor('#ff7f50'),
@@ -266,9 +266,10 @@ def _imwrite_any(path: str, img: np.ndarray) -> bool:
         return False
 
 class ImageEditRequester:
-    def __init__(self, image_path: str, image_bytes: bytes, prompt: str):
+    def __init__(self, image_path: str, image_bytes: bytes, mask_bytes:bytes, prompt: str):
         self.image_path = image_path
         self.image_bytes = image_bytes
+        self.mask_bytes = mask_bytes
         self.prompt = prompt
         self.BASE_URL = "https://ai.t8star.cn/"
         # 建议在系统环境变量中设置 BANANA_API_KEY，避免把密钥写入代码库
@@ -282,30 +283,27 @@ class ImageEditRequester:
     def send_request(self) -> bytes:
         # 记录原始图片尺寸
         files = [
-            ('image', ('input.png', io.BytesIO(self.image_bytes), 'image/png'))
+            ('image', ('input.png', io.BytesIO(self.image_bytes), 'image/png')),
+            ('mask', ('mask.png', io.BytesIO(self.mask_bytes), "image/png")),
         ]
         prop = (
-            "任务前提："
-            "1.我从一张大图中截取了部分图形，需要处理后再贴回去;"
-            "2.我将截取的图形放到了1152*864的区域中间，环绕的是像素值为(0, 0, 0, 0)部分;"
-            "3.我计算了中间区域的坐标和宽高，得到图片后，我将直接从截取内容;"
-
-            "要求："
-            "1.**仅修改**中间部分透明度不为0的区域，其余部分修改为黑色(0, 0, 0)，**禁止**生成模拟透明度为0的背景;"
-            "2.**禁止**向外羽化;"
-            "3.**禁止**修改编辑区域位置;"
-            "4.**禁止**更改编辑区域大小;"
-            "5.编辑区域的边缘部分保持不变,仅修改必要部分;"
-            "6.尽量不改变图中的几何信息;"
-            
-            "任务内容："
-            f"{self.prompt}；"
+            "任务设定：我从一张大图裁出 ROI 放到固定画布中央；"
+            "画布的非编辑区已是纯白(255,255,255,255)。\n"
+            "遮罩规范（务必遵守）：\n"
+            "• mask 仅用作选择：透明像素=允许编辑；不透明像素=禁止编辑；不得对 mask 本身做任何绘制或改动。\n"
+            "• 只在『image』图像中与 mask 透明区域对应的像素内进行修改；"
+            "严禁改变位置/大小/边界对齐；禁止外扩或羽化边缘。\n"
+            "• 非编辑区必须与输入像素完全一致（保持纯白 255,255,255,255），"
+            "不得新增阴影/纹理/噪声/描边。\n"
+            "• 保持几何与透视不变，仅做必要内容替换或修饰，尽量保持原有结构线条。\n"
+            "输出要求：返回整张 PNG；非编辑区需为不透明白色(Alpha=255)；禁止透明背景与棋盘格效果。\n"
+            f"任务内容：{self.prompt}"
         )
         payload = {
             'model': self.MODEL,
             'prompt': prop,
             'response_format': 'b64_json',
-            'aspect_ratio': '4:3',
+            # 'aspect_ratio': '4:3',
             'size': f"{CANVAS_W}x{CANVAS_H}",
         }
         response = requests.request("POST", self.url, headers=self.headers, data=payload, files=files)
@@ -1429,40 +1427,54 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
             self._syncing_rect_update = False
 
     def rebuild_lists(self) -> None:
+        # 1) 清空
         for section in ('up', 'down'):
             lw = self.current_list(section)
             lw.clear()
+
+        # === 列宽配置 ===
+        # 固定列：勾选、标题、半径、开关、删除
+        COL_FIXED = {0: 18, 1: 40, 3: 50, 4: 18, 5: 15}
+        EDIT_MIN = 100                 # 输入框最小宽（可按需要调大/小）
+        HSP = 6                        # Grid 的水平间距
+        MARG = (6, 4, 6, 4)            # Grid 的边距：left, top, right, bottom
+
         global_idx = 1
         for diff in self.differences:
             lw = self.current_list(diff.section)
             color = CATEGORY_COLOR_MAP.get(diff.category, QtGui.QColor('#ff0000'))
+
             item = QtWidgets.QListWidgetItem()
             item.setData(QtCore.Qt.UserRole, diff.id)
+
             w = QtWidgets.QWidget()
             gl = QtWidgets.QGridLayout(w)
-            gl.setContentsMargins(6, 4, 6, 4)
-            gl.setHorizontalSpacing(6)
+            gl.setContentsMargins(*MARG)
+            gl.setHorizontalSpacing(HSP)
+
             title = QtWidgets.QLabel(f"茬点{global_idx}")
             title.setStyleSheet(f"color:{color.name()}; font-size:12px; font-weight:600;")
+
             edit = QtWidgets.QLineEdit()
             edit.setText(diff.label)
             edit.textChanged.connect(lambda text, _id=diff.id: self.on_label_changed(_id, text))
+
             enabled = QtWidgets.QCheckBox()
             enabled.setChecked(diff.enabled)
             enabled.stateChanged.connect(lambda _state, _id=diff.id: self.on_enabled_toggled(_id))
+
             visibled = QtWidgets.QCheckBox()
             visibled.setChecked(diff.visible)
             visibled.stateChanged.connect(lambda _state, _id=diff.id: self.on_visibled_toggled(_id))
-            # radius display label (read-only)
+
             radius_label = QtWidgets.QLabel()
             radius_label.setObjectName(f"radius_{diff.id}")
             radius_label.setStyleSheet("color:#666;font-size:11px;")
-            # store for later updates
             if not hasattr(self, 'radius_labels'):
                 self.radius_labels = {}
             self.radius_labels[diff.id] = radius_label
             self._update_radius_value_for_label(diff)
-            # per-item delete icon button (X)
+
             btn_delete = QtWidgets.QToolButton()
             btn_delete.setToolTip("删除该茬点")
             btn_delete.setAutoRaise(True)
@@ -1472,26 +1484,58 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
                 btn_delete.setIconSize(QtCore.QSize(14, 14))
             except Exception:
                 btn_delete.setText("X")
-            btn_delete.setStyleSheet("QToolButton{border:none;background:transparent;} QToolButton:hover{background:rgba(220,53,69,0.12);border-radius:4px;}")
+            btn_delete.setStyleSheet(
+                "QToolButton{border:none;background:transparent;}"
+                "QToolButton:hover{background:rgba(220,53,69,0.12);border-radius:4px;}"
+            )
             btn_delete.clicked.connect(lambda _=False, _id=diff.id: self.delete_diff_by_id(_id))
 
-            gl.addWidget(visibled, 0, 0)
-            gl.addWidget(title, 0, 1)
-            gl.addWidget(edit, 0, 2)
+            # ---- 尺寸策略：固定列固定宽，输入框可扩展 ----
+            for wid in (visibled, enabled, btn_delete, title, radius_label):
+                wid.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Fixed)
+            edit.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
+
+            # 固定列像素宽
+            visibled.setFixedWidth(COL_FIXED[0])
+            title.setFixedWidth(COL_FIXED[1])
+            radius_label.setFixedWidth(COL_FIXED[3])
+            enabled.setFixedWidth(COL_FIXED[4])
+            btn_delete.setFixedWidth(COL_FIXED[5])
+
+            # Grid 列最小宽/伸展：小列不伸展，编辑列伸展
+            for col, wpx in COL_FIXED.items():
+                gl.setColumnMinimumWidth(col, wpx)
+                gl.setColumnStretch(col, 0)
+            gl.setColumnMinimumWidth(2, EDIT_MIN)       # 输入框最小宽
+            gl.setColumnStretch(2, 1)                   # ✅ 输入框列吃剩余
+
+            # ---- 布局 ----
+            gl.addWidget(visibled,     0, 0)
+            gl.addWidget(title,        0, 1)
+            gl.addWidget(edit,         0, 2)
             gl.addWidget(radius_label, 0, 3)
-            gl.addWidget(enabled, 0, 4)
-            gl.addWidget(btn_delete, 0, 5)
-            gl.setColumnStretch(1, 1)
+            gl.addWidget(enabled,      0, 4)
+            gl.addWidget(btn_delete,   0, 5)
+            # 删掉你原来的 gl.setColumnStretch(1, 1)
+
+            # 统一每行的最小总宽，保证两组列表行宽一致
+            ncols = 6
+            row_min_w = sum(COL_FIXED.values()) + EDIT_MIN + HSP*(ncols-1) + MARG[0] + MARG[2]
+            w.setMinimumWidth(row_min_w)
+            w.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
+
             w.setLayout(gl)
             item.setSizeHint(w.sizeHint())
             lw.addItem(item)
             lw.setItemWidget(item, w)
             global_idx += 1
+
         self.update_total_count()
 
         # 维持当前选中高亮
         if hasattr(self, '_selected_diff_id') and self._selected_diff_id:
             self._set_selected_diff(self._selected_diff_id)
+
 
     def on_label_changed(self, diff_id: str, text: str) -> None:
         diff = next((d for d in self.differences if d.id == diff_id), None)
@@ -1629,23 +1673,6 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
         u = self.rect_items_up.pop(d.id, None)
         dn = self.rect_items_down.pop(d.id, None)
 
-        # also remove AI overlays for this diff
-        ou = self.ai_overlays_up.pop(d.id, None)
-        od = self.ai_overlays_down.pop(d.id, None)
-        if ou:
-            try:
-                self.up_scene.removeItem(ou)
-            except Exception:
-                pass
-        if od:
-            try:
-                self.down_scene.removeItem(od)
-            except Exception:
-                pass
-        if u:
-            self.up_scene.removeItem(u)
-        if dn:
-            self.down_scene.removeItem(dn)
         # 1) 删除对应 AI 输出图片，并重命名后续序号
         try:
             level_dir = self.level_dir()
@@ -2339,36 +2366,50 @@ class AIWorker(QtCore.QObject):
                 l, t, w, h = _quantize_roi(d.x, d.y, d.width, d.height, W, H)
                 rect = QtCore.QRect(l, t, w, h)
                 subimg = img.copy(rect)  # 裁剪原图
+                subimg.save(os.path.join(self.level_dir, f"rect{idx}.png"))
 
-                # 创建一个透明背景的画布 (1152x864)
+                # 1) 输入图
                 canvas = QtGui.QImage(CANVAS_W, CANVAS_H, QtGui.QImage.Format_ARGB32)
-                canvas.fill(QtGui.QColor(0, 0, 0, 0))  # 填充透明背景
-
-                # 居中偏移
+                canvas.fill(QtGui.QColor(255,255,255,255))             # 外部为纯白不透明
                 ox = (CANVAS_W - w) // 2
                 oy = (CANVAS_H - h) // 2
+                p = QtGui.QPainter(canvas)
+                p.drawImage(ox, oy, subimg)                            # ROI 贴中间
+                p.end()
 
-                # 使用 QPainter 将原图绘制到大画布上
-                painter = QtGui.QPainter(canvas)
-                painter.drawImage(ox, oy, subimg)
-                painter.end()
+                buf = QtCore.QBuffer(); buf.open(QtCore.QIODevice.ReadWrite)
+                canvas.save(buf, "PNG"); png_bytes = bytes(buf.data()); buf.close()
 
-                buf = QtCore.QBuffer()
-                buf.open(QtCore.QIODevice.ReadWrite)
-                canvas.save(buf, "PNG")                 # 编码到内存
-                png_bytes = bytes(buf.data())           # 转成 Python bytes
-                buf.close()
+                # 2) 掩膜：外部不透明，ROI 清成透明
+                mask = QtGui.QImage(CANVAS_W, CANVAS_H, QtGui.QImage.Format_ARGB32)
+                mask.fill(QtGui.QColor(255,255,255,255))
+                mp = QtGui.QPainter(mask)
+                mp.setCompositionMode(QtGui.QPainter.CompositionMode_Clear)
+                mp.fillRect(QtCore.QRect(ox, oy, w, h), QtCore.Qt.transparent)
+                mp.end()
 
-                req = ImageEditRequester("input", png_bytes, d.label)
+                bufm = QtCore.QBuffer(); bufm.open(QtCore.QIODevice.ReadWrite)
+                mask.save(bufm, "PNG"); mask_bytes = bytes(bufm.data()); bufm.close()
+
+                # 调试：保存看看
+                # QtGui.QImage.fromData(png_bytes).save(os.path.join(self.level_dir, "dbg_input.png"))
+                # QtGui.QImage.fromData(mask_bytes).save(os.path.join(self.level_dir, "dbg_mask.png"))
+
+                req = ImageEditRequester("input", png_bytes, mask_bytes, d.label)
                 # 获取 AI 返回的图像字节
                 img_bytes = req.send_request()
 
-                patch_qimg = auto_crop_nonblack_qimage(img_bytes, thr=8, pad=0)  # 自动去黑边
+                # out_img = QtGui.QImage.fromData(img_bytes)
+                # out_path = os.path.join(self.level_dir, f"out{idx}.png")
+                # out_img.save(out_path)
 
-                patch_qimg = fit_into_roi_no_distort(patch_qimg, w, h) #居中和调整大小
-                # 保存 AI 返回的图像
+                # patch_qimg = auto_crop_nonblack_qimage(img_bytes, thr=8, pad=0)  # 自动去黑边
+
+                # patch_qimg = fit_into_roi_no_distort(patch_qimg, w, h) #居中和调整大小
+                # # 保存 AI 返回的图像
                 final_path = os.path.join(self.level_dir, f"{self.prepex}_region{idx}.png")
-                patch_qimg.save(final_path)
+                # patch_qimg.save(final_path)
+                QtGui.QImage.fromData(img_bytes).copy(ox, oy, w, h).save(final_path)
 
                 step += 1
                 self.progressed.emit(step, total)
