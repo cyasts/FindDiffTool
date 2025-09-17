@@ -1427,40 +1427,54 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
             self._syncing_rect_update = False
 
     def rebuild_lists(self) -> None:
+        # 1) 清空
         for section in ('up', 'down'):
             lw = self.current_list(section)
             lw.clear()
+
+        # === 列宽配置 ===
+        # 固定列：勾选、标题、半径、开关、删除
+        COL_FIXED = {0: 18, 1: 40, 3: 50, 4: 18, 5: 15}
+        EDIT_MIN = 100                 # 输入框最小宽（可按需要调大/小）
+        HSP = 6                        # Grid 的水平间距
+        MARG = (6, 4, 6, 4)            # Grid 的边距：left, top, right, bottom
+
         global_idx = 1
         for diff in self.differences:
             lw = self.current_list(diff.section)
             color = CATEGORY_COLOR_MAP.get(diff.category, QtGui.QColor('#ff0000'))
+
             item = QtWidgets.QListWidgetItem()
             item.setData(QtCore.Qt.UserRole, diff.id)
+
             w = QtWidgets.QWidget()
             gl = QtWidgets.QGridLayout(w)
-            gl.setContentsMargins(6, 4, 6, 4)
-            gl.setHorizontalSpacing(6)
+            gl.setContentsMargins(*MARG)
+            gl.setHorizontalSpacing(HSP)
+
             title = QtWidgets.QLabel(f"茬点{global_idx}")
             title.setStyleSheet(f"color:{color.name()}; font-size:12px; font-weight:600;")
+
             edit = QtWidgets.QLineEdit()
             edit.setText(diff.label)
             edit.textChanged.connect(lambda text, _id=diff.id: self.on_label_changed(_id, text))
+
             enabled = QtWidgets.QCheckBox()
             enabled.setChecked(diff.enabled)
             enabled.stateChanged.connect(lambda _state, _id=diff.id: self.on_enabled_toggled(_id))
+
             visibled = QtWidgets.QCheckBox()
             visibled.setChecked(diff.visible)
             visibled.stateChanged.connect(lambda _state, _id=diff.id: self.on_visibled_toggled(_id))
-            # radius display label (read-only)
+
             radius_label = QtWidgets.QLabel()
             radius_label.setObjectName(f"radius_{diff.id}")
             radius_label.setStyleSheet("color:#666;font-size:11px;")
-            # store for later updates
             if not hasattr(self, 'radius_labels'):
                 self.radius_labels = {}
             self.radius_labels[diff.id] = radius_label
             self._update_radius_value_for_label(diff)
-            # per-item delete icon button (X)
+
             btn_delete = QtWidgets.QToolButton()
             btn_delete.setToolTip("删除该茬点")
             btn_delete.setAutoRaise(True)
@@ -1470,26 +1484,58 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
                 btn_delete.setIconSize(QtCore.QSize(14, 14))
             except Exception:
                 btn_delete.setText("X")
-            btn_delete.setStyleSheet("QToolButton{border:none;background:transparent;} QToolButton:hover{background:rgba(220,53,69,0.12);border-radius:4px;}")
+            btn_delete.setStyleSheet(
+                "QToolButton{border:none;background:transparent;}"
+                "QToolButton:hover{background:rgba(220,53,69,0.12);border-radius:4px;}"
+            )
             btn_delete.clicked.connect(lambda _=False, _id=diff.id: self.delete_diff_by_id(_id))
 
-            gl.addWidget(visibled, 0, 0)
-            gl.addWidget(title, 0, 1)
-            gl.addWidget(edit, 0, 2)
+            # ---- 尺寸策略：固定列固定宽，输入框可扩展 ----
+            for wid in (visibled, enabled, btn_delete, title, radius_label):
+                wid.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Fixed)
+            edit.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
+
+            # 固定列像素宽
+            visibled.setFixedWidth(COL_FIXED[0])
+            title.setFixedWidth(COL_FIXED[1])
+            radius_label.setFixedWidth(COL_FIXED[3])
+            enabled.setFixedWidth(COL_FIXED[4])
+            btn_delete.setFixedWidth(COL_FIXED[5])
+
+            # Grid 列最小宽/伸展：小列不伸展，编辑列伸展
+            for col, wpx in COL_FIXED.items():
+                gl.setColumnMinimumWidth(col, wpx)
+                gl.setColumnStretch(col, 0)
+            gl.setColumnMinimumWidth(2, EDIT_MIN)       # 输入框最小宽
+            gl.setColumnStretch(2, 1)                   # ✅ 输入框列吃剩余
+
+            # ---- 布局 ----
+            gl.addWidget(visibled,     0, 0)
+            gl.addWidget(title,        0, 1)
+            gl.addWidget(edit,         0, 2)
             gl.addWidget(radius_label, 0, 3)
-            gl.addWidget(enabled, 0, 4)
-            gl.addWidget(btn_delete, 0, 5)
-            gl.setColumnStretch(1, 1)
+            gl.addWidget(enabled,      0, 4)
+            gl.addWidget(btn_delete,   0, 5)
+            # 删掉你原来的 gl.setColumnStretch(1, 1)
+
+            # 统一每行的最小总宽，保证两组列表行宽一致
+            ncols = 6
+            row_min_w = sum(COL_FIXED.values()) + EDIT_MIN + HSP*(ncols-1) + MARG[0] + MARG[2]
+            w.setMinimumWidth(row_min_w)
+            w.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
+
             w.setLayout(gl)
             item.setSizeHint(w.sizeHint())
             lw.addItem(item)
             lw.setItemWidget(item, w)
             global_idx += 1
+
         self.update_total_count()
 
         # 维持当前选中高亮
         if hasattr(self, '_selected_diff_id') and self._selected_diff_id:
             self._set_selected_diff(self._selected_diff_id)
+
 
     def on_label_changed(self, diff_id: str, text: str) -> None:
         diff = next((d for d in self.differences if d.id == diff_id), None)
@@ -1627,23 +1673,6 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
         u = self.rect_items_up.pop(d.id, None)
         dn = self.rect_items_down.pop(d.id, None)
 
-        # also remove AI overlays for this diff
-        ou = self.ai_overlays_up.pop(d.id, None)
-        od = self.ai_overlays_down.pop(d.id, None)
-        if ou:
-            try:
-                self.up_scene.removeItem(ou)
-            except Exception:
-                pass
-        if od:
-            try:
-                self.down_scene.removeItem(od)
-            except Exception:
-                pass
-        if u:
-            self.up_scene.removeItem(u)
-        if dn:
-            self.down_scene.removeItem(dn)
         # 1) 删除对应 AI 输出图片，并重命名后续序号
         try:
             level_dir = self.level_dir()
