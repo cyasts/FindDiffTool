@@ -15,7 +15,7 @@ except Exception:  # pragma: no cover
 
 ENABLE_MOUSE : bool = True
 
-CANVAS_W, CANVAS_H = 1152, 864  # 4:3
+CANVAS_W, CANVAS_H = 1024, 1024  # 4:3
 
 CATEGORY_COLOR_MAP: Dict[str, QtGui.QColor] = {
     '情感': QtGui.QColor('#ff7f50'),
@@ -266,9 +266,10 @@ def _imwrite_any(path: str, img: np.ndarray) -> bool:
         return False
 
 class ImageEditRequester:
-    def __init__(self, image_path: str, image_bytes: bytes, prompt: str):
+    def __init__(self, image_path: str, image_bytes: bytes, mask_bytes:bytes, prompt: str):
         self.image_path = image_path
         self.image_bytes = image_bytes
+        self.mask_bytes = mask_bytes
         self.prompt = prompt
         self.BASE_URL = "https://ai.t8star.cn/"
         # 建议在系统环境变量中设置 BANANA_API_KEY，避免把密钥写入代码库
@@ -282,30 +283,27 @@ class ImageEditRequester:
     def send_request(self) -> bytes:
         # 记录原始图片尺寸
         files = [
-            ('image', ('input.png', io.BytesIO(self.image_bytes), 'image/png'))
+            ('image', ('input.png', io.BytesIO(self.image_bytes), 'image/png')),
+            ('mask', ('mask.png', io.BytesIO(self.mask_bytes), "image/png")),
         ]
         prop = (
-            "任务前提："
-            "1.我从一张大图中截取了部分图形，需要处理后再贴回去;"
-            "2.我将截取的图形放到了1152*864的区域中间，环绕的是像素值为(0, 0, 0, 0)部分;"
-            "3.我计算了中间区域的坐标和宽高，得到图片后，我将直接从截取内容;"
-
-            "要求："
-            "1.**仅修改**中间部分透明度不为0的区域，其余部分修改为黑色(0, 0, 0)，**禁止**生成模拟透明度为0的背景;"
-            "2.**禁止**向外羽化;"
-            "3.**禁止**修改编辑区域位置;"
-            "4.**禁止**更改编辑区域大小;"
-            "5.编辑区域的边缘部分保持不变,仅修改必要部分;"
-            "6.尽量不改变图中的几何信息;"
-            
-            "任务内容："
-            f"{self.prompt}；"
+            "任务设定：我从一张大图裁出 ROI 放到固定画布中央；"
+            "画布的非编辑区已是纯白(255,255,255,255)。\n"
+            "遮罩规范（务必遵守）：\n"
+            "• mask 仅用作选择：透明像素=允许编辑；不透明像素=禁止编辑；不得对 mask 本身做任何绘制或改动。\n"
+            "• 只在『image』图像中与 mask 透明区域对应的像素内进行修改；"
+            "严禁改变位置/大小/边界对齐；禁止外扩或羽化边缘。\n"
+            "• 非编辑区必须与输入像素完全一致（保持纯白 255,255,255,255），"
+            "不得新增阴影/纹理/噪声/描边。\n"
+            "• 保持几何与透视不变，仅做必要内容替换或修饰，尽量保持原有结构线条。\n"
+            "输出要求：返回整张 PNG；非编辑区需为不透明白色(Alpha=255)；禁止透明背景与棋盘格效果。\n"
+            f"任务内容：{self.prompt}"
         )
         payload = {
             'model': self.MODEL,
             'prompt': prop,
             'response_format': 'b64_json',
-            'aspect_ratio': '4:3',
+            # 'aspect_ratio': '4:3',
             'size': f"{CANVAS_W}x{CANVAS_H}",
         }
         response = requests.request("POST", self.url, headers=self.headers, data=payload, files=files)
@@ -2339,36 +2337,50 @@ class AIWorker(QtCore.QObject):
                 l, t, w, h = _quantize_roi(d.x, d.y, d.width, d.height, W, H)
                 rect = QtCore.QRect(l, t, w, h)
                 subimg = img.copy(rect)  # 裁剪原图
+                subimg.save(os.path.join(self.level_dir, f"rect{idx}.png"))
 
-                # 创建一个透明背景的画布 (1152x864)
+                # 1) 输入图
                 canvas = QtGui.QImage(CANVAS_W, CANVAS_H, QtGui.QImage.Format_ARGB32)
-                canvas.fill(QtGui.QColor(0, 0, 0, 0))  # 填充透明背景
-
-                # 居中偏移
+                canvas.fill(QtGui.QColor(255,255,255,255))             # 外部为纯白不透明
                 ox = (CANVAS_W - w) // 2
                 oy = (CANVAS_H - h) // 2
+                p = QtGui.QPainter(canvas)
+                p.drawImage(ox, oy, subimg)                            # ROI 贴中间
+                p.end()
 
-                # 使用 QPainter 将原图绘制到大画布上
-                painter = QtGui.QPainter(canvas)
-                painter.drawImage(ox, oy, subimg)
-                painter.end()
+                buf = QtCore.QBuffer(); buf.open(QtCore.QIODevice.ReadWrite)
+                canvas.save(buf, "PNG"); png_bytes = bytes(buf.data()); buf.close()
 
-                buf = QtCore.QBuffer()
-                buf.open(QtCore.QIODevice.ReadWrite)
-                canvas.save(buf, "PNG")                 # 编码到内存
-                png_bytes = bytes(buf.data())           # 转成 Python bytes
-                buf.close()
+                # 2) 掩膜：外部不透明，ROI 清成透明
+                mask = QtGui.QImage(CANVAS_W, CANVAS_H, QtGui.QImage.Format_ARGB32)
+                mask.fill(QtGui.QColor(255,255,255,255))
+                mp = QtGui.QPainter(mask)
+                mp.setCompositionMode(QtGui.QPainter.CompositionMode_Clear)
+                mp.fillRect(QtCore.QRect(ox, oy, w, h), QtCore.Qt.transparent)
+                mp.end()
 
-                req = ImageEditRequester("input", png_bytes, d.label)
+                bufm = QtCore.QBuffer(); bufm.open(QtCore.QIODevice.ReadWrite)
+                mask.save(bufm, "PNG"); mask_bytes = bytes(bufm.data()); bufm.close()
+
+                # 调试：保存看看
+                # QtGui.QImage.fromData(png_bytes).save(os.path.join(self.level_dir, "dbg_input.png"))
+                # QtGui.QImage.fromData(mask_bytes).save(os.path.join(self.level_dir, "dbg_mask.png"))
+
+                req = ImageEditRequester("input", png_bytes, mask_bytes, d.label)
                 # 获取 AI 返回的图像字节
                 img_bytes = req.send_request()
 
-                patch_qimg = auto_crop_nonblack_qimage(img_bytes, thr=8, pad=0)  # 自动去黑边
+                # out_img = QtGui.QImage.fromData(img_bytes)
+                # out_path = os.path.join(self.level_dir, f"out{idx}.png")
+                # out_img.save(out_path)
 
-                patch_qimg = fit_into_roi_no_distort(patch_qimg, w, h) #居中和调整大小
-                # 保存 AI 返回的图像
+                # patch_qimg = auto_crop_nonblack_qimage(img_bytes, thr=8, pad=0)  # 自动去黑边
+
+                # patch_qimg = fit_into_roi_no_distort(patch_qimg, w, h) #居中和调整大小
+                # # 保存 AI 返回的图像
                 final_path = os.path.join(self.level_dir, f"{self.prepex}_region{idx}.png")
-                patch_qimg.save(final_path)
+                # patch_qimg.save(final_path)
+                QtGui.QImage.fromData(img_bytes).copy(ox, oy, w, h).save(final_path)
 
                 step += 1
                 self.progressed.emit(step, total)
