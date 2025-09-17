@@ -2375,7 +2375,7 @@ class AIWorker(QtCore.QObject):
             # compute failures: region files not present
             failed = []
             for idx in self.target_indices:
-                dst = os.path.join(self.level_dir, f"{self.origin_path}_region{idx}.png")
+                dst = os.path.join(self.level_dir, f"{self.prepex}_region{idx}.png")
                 if not os.path.isfile(dst):
                     failed.append(idx)
             self.finished.emit(failed)
