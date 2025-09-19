@@ -12,8 +12,8 @@ permissions:
   contents: write
 
 env:
-  PIP_ONLY_BINARY: ":all:"        # 尽量装二进制包
-  ENTRY_FILE: main.py             # 如果入口不在根目录，请改成 pyside_app/main.py
+  PIP_ONLY_BINARY: ":all:"
+  ENTRY_FILE: main.py           # 若入口在子目录，改成 pyside_app/main.py
   APP_NAME: FindDiffEditor
 
 jobs:
@@ -21,108 +21,76 @@ jobs:
     name: macOS (arm64)
     runs-on: macos-14
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Python 3.11
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11" }
       - name: Install deps
         run: |
           python -m pip install --upgrade pip setuptools wheel
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
           pip install "pyinstaller>=6.9,<7"
-
-      - name: Build app (arm64)
-        env:
-          MACOSX_DEPLOYMENT_TARGET: "10.15"
+      - name: Build app (arm64) -> DMG
+        env: { MACOSX_DEPLOYMENT_TARGET: "10.15" }
         run: |
           NAME="${APP_NAME}-arm64"
           ARGS=( --noconfirm --windowed --name "$NAME" --target-arch arm64 )
           if [ -f Icon.icns ]; then ARGS+=( --icon Icon.icns ); fi
-
           pyinstaller "${ARGS[@]}" "$ENTRY_FILE"
 
           APP="dist/${NAME}.app"
           [ -d "$APP" ] || { echo "Missing $APP"; exit 1; }
 
-          # 生成 DMG
+          # 只生成 DMG（压缩 UDZO）
           hdiutil create -volname "$NAME" -srcfolder "$APP" -ov -format UDZO "dist/${NAME}.dmg"
-
-      - name: Upload macOS arm64 artifact
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
           name: mac-arm64
-          path: |
-            dist/${{ env.APP_NAME }}-arm64.app
-            dist/${{ env.APP_NAME }}-arm64.dmg
+          path: dist/${{ env.APP_NAME }}-arm64.dmg
 
   mac-x86_64:
     name: macOS (x86_64)
-    runs-on: macos-13   # Intel 机，原生 x86_64
+    runs-on: macos-13
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Python 3.11
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11" }
       - name: Install deps
         run: |
           python -m pip install --upgrade pip setuptools wheel
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
           pip install "pyinstaller>=6.9,<7"
-
-      - name: Build app (x86_64)
-        env:
-          MACOSX_DEPLOYMENT_TARGET: "10.15"
+      - name: Build app (x86_64) -> DMG
+        env: { MACOSX_DEPLOYMENT_TARGET: "10.15" }
         run: |
           NAME="${APP_NAME}-x86_64"
           ARGS=( --noconfirm --windowed --name "$NAME" --target-arch x86_64 )
           if [ -f Icon.icns ]; then ARGS+=( --icon Icon.icns ); fi
-
           pyinstaller "${ARGS[@]}" "$ENTRY_FILE"
 
           APP="dist/${NAME}.app"
           [ -d "$APP" ] || { echo "Missing $APP"; exit 1; }
 
-          # 生成 DMG
           hdiutil create -volname "$NAME" -srcfolder "$APP" -ov -format UDZO "dist/${NAME}.dmg"
-
-      - name: Upload macOS x86_64 artifact
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
           name: mac-x86_64
-          path: |
-            dist/${{ env.APP_NAME }}-x86_64.app
-            dist/${{ env.APP_NAME }}-x86_64.dmg
+          path: dist/${{ env.APP_NAME }}-x86_64.dmg
 
   windows:
     name: Windows
     runs-on: windows-latest
-    env:
-      PIP_ONLY_BINARY: ":all:"
+    env: { PIP_ONLY_BINARY: ":all:" }
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Python 3.11
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11" }
       - name: Install deps
         shell: pwsh
         run: |
           python -m pip install --upgrade pip setuptools wheel
           if (Test-Path requirements.txt) { pip install -r requirements.txt }
           pip install "pyinstaller>=6.9,<7"
-
-      - name: Build Windows app
+      - name: Build Windows -> zip
         shell: pwsh
         run: |
           $Name = "${env:APP_NAME}"
@@ -133,9 +101,7 @@ jobs:
           $distDir = "dist\$Name"
           if (-not (Test-Path $distDir)) { throw "Dist not found: $distDir" }
           Compress-Archive -Path "$distDir\*" -DestinationPath "dist\$Name-windows.zip" -Force
-
-      - name: Upload Windows artifact
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
           name: windows-zip
           path: dist/${{ env.APP_NAME }}-windows.zip
@@ -146,26 +112,13 @@ jobs:
     needs: [mac-arm64, mac-x86_64, windows]
     if: startsWith(github.ref, 'refs/tags/')
     steps:
-      - name: Download macOS arm64
-        uses: actions/download-artifact@v4
-        with:
-          name: mac-arm64
-          path: artifacts/mac-arm64
-
-      - name: Download macOS x86_64
-        uses: actions/download-artifact@v4
-        with:
-          name: mac-x86_64
-          path: artifacts/mac-x86_64
-
-      - name: Download Windows zip
-        uses: actions/download-artifact@v4
-        with:
-          name: windows-zip
-          path: artifacts/windows
-
-      - name: Create Release and Upload Assets
-        uses: softprops/action-gh-release@v2
+      - uses: actions/download-artifact@v4
+        with: { name: mac-arm64,   path: artifacts/mac-arm64 }
+      - uses: actions/download-artifact@v4
+        with: { name: mac-x86_64, path: artifacts/mac-x86_64 }
+      - uses: actions/download-artifact@v4
+        with: { name: windows-zip, path: artifacts/windows }
+      - uses: softprops/action-gh-release@v2
         with:
           files: |
             artifacts/mac-arm64/*.dmg

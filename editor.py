@@ -1026,7 +1026,7 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
             return (1.0 - py) * h
 
         self._clear_all_items()
-        self._update_status(cfg.get('status', "未开始"))
+        self._update_status(cfg.get('status', "unsaved"))
         self.differences.clear()
         for diff in cfg.get('differences', []):
             points = diff.get('points', [])
