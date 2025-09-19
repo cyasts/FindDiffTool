@@ -1,0 +1,21 @@
+<!-- img.qrc -->
+<RCC>
+  <qresource prefix="/img">
+    <file alias="c1.png">assets/img/c1.png</file>
+    <file alias="c2.png">assets/img/c2.png</file>
+    <file alias="c3.png">assets/img/c3.png</file>
+    <file alias="c4.png">assets/img/c4.png</file>
+    <file alias="c5.png">assets/img/c5.png</file>
+    <file alias="c6.png">assets/img/c6.png</file>
+    <file alias="c7.png">assets/img/c7.png</file>
+    <file alias="c8.png">assets/img/c8.png</file>
+    <file alias="c9.png">assets/img/c9.png</file>
+    <file alias="c10.png">assets/img/c10.png</file>
+    <file alias="c11.png">assets/img/c11.png</file>
+    <file alias="c12.png">assets/img/c12.png</file>
+    <file alias="c13.png">assets/img/c13.png</file>
+    <file alias="c14.png">assets/img/c14.png</file>
+    <file alias="c15.png">assets/img/c15.png</file>
+    <!-- 也可以放一张通用 square.png，或更多等级 -->
+  </qresource>
+</RCC>

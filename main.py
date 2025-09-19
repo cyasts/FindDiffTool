@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from typing import List, Optional
 
 from PySide6 import QtCore, QtGui, QtWidgets
+from editor import DifferenceEditorWindow
 
 
 IMAGE_EXTENSIONS = {'.png', '.jpg', '.jpeg', '.bmp', '.gif'}
@@ -13,8 +14,7 @@ IMAGE_EXTENSIONS = {'.png', '.jpg', '.jpeg', '.bmp', '.gif'}
 class ImagePair:
     name: str
     directory: str
-    up_image_path: str
-    down_image_path: str
+    image_path: str
 
 
 class ImageCard(QtWidgets.QFrame):
@@ -42,7 +42,7 @@ class ImageCard(QtWidgets.QFrame):
         image_label.setFixedSize(240, 150)
         image_label.setAlignment(QtCore.Qt.AlignCenter)
         image_label.setStyleSheet("border-top-left-radius: 8px; border-top-right-radius: 8px;")
-        pixmap = QtGui.QPixmap(self.pair.up_image_path)
+        pixmap = QtGui.QPixmap(self.pair.image_path)
         if not pixmap.isNull():
             image_label.setPixmap(pixmap.scaled(image_label.size(), QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation))
         layout.addWidget(image_label)
@@ -144,14 +144,32 @@ class MainWindow(QtWidgets.QMainWindow):
         header_layout.setSpacing(10)
         header.setStyleSheet("background:white; border-radius:8px;")
 
-        title = QtWidgets.QLabel("找不同游戏关卡编辑器")
-        title.setStyleSheet("font-size:20px; font-weight:700; color:#333;")
+        self.header = header  # 保存引用，后面算宽度要用
+        self.header_layout = header_layout
 
-        header_layout.addWidget(title)
+        self.title_label = QtWidgets.QLabel("找不同游戏关卡编辑器")
+        self._title_full = self.title_label.text()           # ✅ 记住原文
+        self.title_label.setWordWrap(False)
+        self.title_label.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Fixed)
+        self.title_label.setMinimumWidth(220)                 # ✅ 给一个最小宽度，避免被压没
+        self.title_label.setStyleSheet("font-size:20px; font-weight:700; color:#333;")
+
+        header_layout.addWidget(self.title_label)
         header_layout.addStretch(1)
 
         self.btn_set_config = QtWidgets.QPushButton("设置输出目录")
         self.btn_load_images = QtWidgets.QPushButton("加载图片")
+
+        btn_css = """
+        QPushButton{
+        background:#0d6efd; color:#fff; padding:6px 12px;
+        border-radius:6px; border:1px solid #0d6efd;
+        }
+        QPushButton:hover{ background:#0b5ed7; border-color:#0b5ed7; }
+        """
+        self.btn_set_config.setStyleSheet(btn_css)
+        self.btn_load_images.setStyleSheet(btn_css)
+
         header_layout.addWidget(self.btn_set_config)
         header_layout.addWidget(self.btn_load_images)
 
@@ -200,6 +218,33 @@ class MainWindow(QtWidgets.QMainWindow):
             self.set_status(f"输出目录已设置: {self.config_dir}")
             self.refresh_config_dir_label()
 
+    def _validate_image_path(self, pair: ImagePair) -> (bool, str):
+        """检查文件存在、可读、且 Qt 能加载。"""
+        path = pair.image_path
+        if not path:
+            return False, "未提供图片路径。"
+
+        # 1) 路径存在且是文件
+        if not os.path.exists(path):
+            return False, f"图片文件不存在：\n{path}"
+        if not os.path.isfile(path):
+            return False, f"不是一个有效文件：\n{path}"
+
+        # 2) 可读权限
+        if not os.access(path, os.R_OK):
+            return False, f"没有读取权限：\n{path}"
+
+        # 3) Qt 能否加载（判定文件是否损坏/格式不支持）
+        pix = QtGui.QPixmap(path)
+        if pix.isNull():
+            # 进一步尝试用 QImageReader 看具体错误
+            reader = QtGui.QImageReader(path)
+            fmt = reader.format().data().decode("ascii", "ignore") if reader.format() else "unknown"
+            err = reader.errorString() if hasattr(reader, "errorString") else "unknown"
+            return False, f"无法加载图片（格式:{fmt}）：\n{path}\n错误：{err}"
+
+        return True, ""
+
     def on_load_images(self) -> None:
         directory = QtWidgets.QFileDialog.getExistingDirectory(self, "选择图片资源文件夹")
         if not directory:
@@ -221,9 +266,8 @@ class MainWindow(QtWidgets.QMainWindow):
         pairs: List[ImagePair] = []
         for file in image_files:
             name = os.path.splitext(file)[0]
-            up_path = os.path.join(directory, file)
-            down_path = up_path
-            pairs.append(ImagePair(name=name, directory=directory, up_image_path=up_path, down_image_path=down_path))
+            path = os.path.join(directory, file)
+            pairs.append(ImagePair(name=name, directory=directory, image_path=path))
 
         cards: List[ImageCard] = []
         for pair in pairs:
@@ -257,11 +301,12 @@ class MainWindow(QtWidgets.QMainWindow):
             QtWidgets.QMessageBox.information(self, "提示", "请先设置输出目录")
             return
 
-        try:
-            # when executed as a module or script, prefer package import
-            from pyside_app.editor import DifferenceEditorWindow  # type: ignore
-        except Exception:
-            from editor import DifferenceEditorWindow  # fallback when running from package dir
+        ok, reason = self._validate_image_path(pair)
+        if not ok:
+            # 弹窗 + 状态栏提示，方便用户知道问题与路径
+            QtWidgets.QMessageBox.warning(self, "无法打开图片", reason)
+            self.set_status(f"打开失败：{reason.replace(os.linesep, ' ')}")
+            return
 
         win = DifferenceEditorWindow(pair=pair, config_dir=self.config_dir, parent=self)
         # keep a reference to avoid immediate GC when parented

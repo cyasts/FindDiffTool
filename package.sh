@@ -1,150 +1,129 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-cd "$ROOT"
+# ================== 基本配置 ==================
+APP_NAME=FindDiffEditor
+ENTRY_FILE=main.py         # 如果放在子目录，改成 pyside_app/main.py
+ICON_FILE=Icon.icns        # 可不存在；不存在则忽略
+REQ_FILE=requirements.txt  # 依赖文件
 
-TARGET=${1:-mac-arm64} # mac-arm64 | mac-x86_64 | mac-all | mac-universal
-# Detect app dir (monorepo vs standalone)
-if [ -f "pyside_app/main.py" ]; then
-  APP_DIR="pyside_app"
-else
-  APP_DIR="."
-fi
-ICON_PATH="Icon.icns"
-if [ ! -f "$ICON_PATH" ]; then
-  ICON_PATH="$APP_DIR/i.icns"
-fi
-if [ ! -f "$ICON_PATH" ] && [ -f "i.icns" ]; then
-  ICON_PATH="i.icns"
-fi
+# ================== 工具函数 ==================
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$here"
 
-ensure_tools_for_arch() {
-  local VENV=$1
-  local ARCH=$2
-  local ARCH_CMD=( )
-  if command -v arch >/dev/null 2>&1; then
-    ARCH_CMD=(arch -${ARCH})
+have_cmd() { command -v "$1" >/dev/null 2>&1; }
+
+ensure_rosetta_for_x86() {
+  if [[ "$(uname -m)" == "arm64" ]]; then
+    if ! /usr/bin/pgrep oahd >/dev/null 2>&1; then
+      echo "需要 Rosetta 才能构建 x86_64。正在检查…"
+      sudo softwareupdate --install-rosetta --agree-to-license || true
+    fi
   fi
-  if [ ! -d "$VENV" ]; then
-    "${ARCH_CMD[@]}" python3 -m venv "$VENV"
+}
+
+venv_for_arch() {
+  local arch="$1"       # arm64 | x86_64
+  echo ".venv-${arch}"
+}
+
+py_for_arch() {
+  local arch="$1"
+  if have_cmd arch; then
+    echo "arch -${arch} python3"
+  else
+    echo "python3"
+  fi
+}
+
+pip_for_arch() {
+  local arch="$1"
+  if have_cmd arch; then
+    echo "arch -${arch} python3 -m pip"
+  else
+    echo "python3 -m pip"
+  fi
+}
+
+install_tools_and_deps() {
+  local arch="$1"
+  local venv="$(venv_for_arch "$arch")"
+  if [[ ! -d "$venv" ]]; then
+    eval "$(py_for_arch "$arch") -m venv \"$venv\""
   fi
   # shellcheck disable=SC1090
-  source "$VENV/bin/activate"
+  source "$venv/bin/activate"
   python -m pip install --upgrade pip setuptools wheel
+
+  # 避免源码编译（更快更稳）
   export PIP_ONLY_BINARY=:all:
-  if [ -f "$APP_DIR/requirements.txt" ]; then
-    pip install -r "$APP_DIR/requirements.txt"
-  elif [ -f "requirements.txt" ]; then
-    pip install -r requirements.txt
+
+  # 安装项目依赖
+  if [[ -f "$REQ_FILE" ]]; then
+    pip install -r "$REQ_FILE"
   fi
+  # 安装打包工具
   pip install "pyinstaller>=6.9,<7" "altgraph>=0.17.4" "macholib>=1.16.3"
 }
 
-build_mac_arch() {
-  local ARCH=$1 # arm64 | x86_64
-  local VENV=".venv-${ARCH}"
-  ensure_tools_for_arch "$VENV" "$ARCH"
+build_one_arch() {
+  local arch="$1"  # arm64 | x86_64
+  echo "==> 构建架构：$arch"
 
-  local NAME="FindDiffEditor-${ARCH}"
+  # Apple Silicon 构建 x86_64 需要 Rosetta
+  if [[ "$arch" == "x86_64" ]]; then
+    ensure_rosetta_for_x86
+  fi
+
+  install_tools_and_deps "$arch"
+
+  local venv="$(venv_for_arch "$arch")"
+  # shellcheck disable=SC1090
+  source "$venv/bin/activate"
+
+  local NAME="${APP_NAME}-${arch}"
   local PYI_ARGS=(
     --noconfirm
     --name "$NAME"
     --windowed
   )
-  if [ -f "$ICON_PATH" ]; then
-    PYI_ARGS+=(--icon "$ICON_PATH")
+  if [[ -f "$ICON_FILE" ]]; then
+    PYI_ARGS+=( --icon "$ICON_FILE" )
   fi
 
-  local ENTRY="$APP_DIR/main.py"
-  [ -f "$ENTRY" ] || ENTRY="main.py"
-  pyinstaller "${PYI_ARGS[@]}" "$ENTRY"
+  # 这里可按需添加数据文件，例如：
+  # PYI_ARGS+=( --add-data "assets:assets" )
+
+  pyinstaller "${PYI_ARGS[@]}" "$ENTRY_FILE"
 
   local APP_PATH="dist/${NAME}.app"
-  if [ ! -d "$APP_PATH" ]; then
-    echo "Build failed: $APP_PATH not found" >&2
-    exit 1
-  fi
-  echo "Built app: $APP_PATH"
+  [[ -d "$APP_PATH" ]] || { echo "打包失败：$APP_PATH 不存在"; exit 1; }
+  echo "✅ 产物：$APP_PATH"
 
+  # 可选：生成 DMG
   local DMG_PATH="dist/${NAME}.dmg"
   hdiutil create -volname "$NAME" -srcfolder "$APP_PATH" -ov -format UDZO "$DMG_PATH"
-  echo "Created DMG: $DMG_PATH"
+  echo "✅ DMG：$DMG_PATH"
 
   deactivate || true
 }
 
-build_mac_universal() {
-  local VENV=".venv-universal"
-  # Use host arch python; PyInstaller will create universal2 bootloader
-  if [ ! -d "$VENV" ]; then
-    python3 -m venv "$VENV"
-  fi
-  # shellcheck disable=SC1090
-  source "$VENV/bin/activate"
-  python -m pip install --upgrade pip setuptools wheel
-  export PIP_ONLY_BINARY=:all:
-  if [ -f "$APP_DIR/requirements.txt" ]; then
-    pip install -r "$APP_DIR/requirements.txt"
-  elif [ -f "requirements.txt" ]; then
-    pip install -r requirements.txt
-  fi
-  pip install "pyinstaller>=6.9,<7" "altgraph>=0.17.4" "macholib>=1.16.3"
-
-  local NAME="FindDiffEditor-universal"
-  local PYI_ARGS=(
-    --noconfirm
-    --name "$NAME"
-    --windowed
-    --target-arch universal2
-    --exclude-module PIL._webp
-  )
-  if [ -f "$ICON_PATH" ]; then
-    PYI_ARGS+=(--icon "$ICON_PATH")
-  fi
-
-  local ENTRY="$APP_DIR/main.py"
-  [ -f "$ENTRY" ] || ENTRY="main.py"
-  pyinstaller "${PYI_ARGS[@]}" "$ENTRY" || {
-    echo "Universal build failed. Falling back to building per-arch apps (arm64 & x86_64)." >&2
-    deactivate || true
-    build_mac_arch arm64
-    build_mac_arch x86_64
-    return
-  }
-
-  local APP_PATH="dist/${NAME}.app"
-  if [ ! -d "$APP_PATH" ]; then
-    echo "Build failed: $APP_PATH not found" >&2
-    exit 1
-  fi
-  echo "Built app: $APP_PATH"
-
-  local DMG_PATH="dist/${NAME}.dmg"
-  hdiutil create -volname "$NAME" -srcfolder "$APP_PATH" -ov -format UDZO "$DMG_PATH"
-  echo "Created DMG: $DMG_PATH"
-
-  deactivate || true
+usage() {
+  cat <<EOF
+用法：
+  $0 mac-arm64       仅打 arm64.app
+  $0 mac-x86_64      仅打 x86_64.app
+  $0 mac-all         两个都打
+EOF
 }
 
-case "$TARGET" in
-  mac-arm64)
-    build_mac_arch arm64
-    ;;
-  mac-x86_64)
-    build_mac_arch x86_64
-    ;;
-  mac-all)
-    build_mac_arch arm64
-    build_mac_arch x86_64
-    ;;
-  mac-universal)
-    build_mac_universal
-    ;;
-  *)
-    echo "Usage: $0 {mac-arm64|mac-x86_64|mac-all|mac-universal}" >&2
-    exit 2
-    ;;
- esac
+# ================== 主流程 ==================
+target="${1:-mac-all}"
+case "$target" in
+  mac-arm64)   build_one_arch arm64 ;;
+  mac-x86_64)  build_one_arch x86_64 ;;
+  mac-all)     build_one_arch arm64; build_one_arch x86_64 ;;
+  *)           usage; exit 2 ;;
+esac
 
-echo "Done."
+echo "🎉 Done."

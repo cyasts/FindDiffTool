@@ -1,952 +1,24 @@
-import os, json, requests
-import io, base64, math
+import os, json, math
 import shutil, time
-from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
-import cv2
-import numpy as np
-from PIL import Image
-
 from PySide6 import QtCore, QtGui, QtWidgets
-try:
-    import shiboken6  # for isValid checks on Qt objects
-except Exception:  # pragma: no cover
-    shiboken6 = None
 
-ENABLE_MOUSE : bool = True
-
-CANVAS_W, CANVAS_H = 1024, 1024  # 4:3
-
-CATEGORY_COLOR_MAP: Dict[str, QtGui.QColor] = {
-    '情感': QtGui.QColor('#ff7f50'),
-    '颜色': QtGui.QColor('#28a745'),
-    '增强': QtGui.QColor('#6f42c1'),
-    '置换': QtGui.QColor('#6c63ff'),
-    '修改': QtGui.QColor('#ff9800'),
-}
-
-# Discrete hint-circle radius levels (in natural pixels)
-RADIUS_LEVELS: List[int] = [53, 59, 65, 71, 76, 81, 85, 90, 95, 100, 105,110, 117, 124,129]
-# Min rectangle size (natural pixels)
-MIN_RECT_SIZE: float = 110
-
-
-@dataclass
-class Difference:
-    id: str
-    name: str
-    section: str  # 'up' | 'down'
-    category: str
-    label: str
-    enabled: bool
-    visible: bool
-    # rectangle stored in natural pixel coordinates
-    x: float
-    y: float
-    width: float
-    height: float
-    # independent hint circles for up/down
-    hint_level: int = 0
-    cx: float = -1.0
-    cy: float = -1.0
-
+from utils import compose_result
+from models import Difference, RADIUS_LEVELS, MIN_RECT_SIZE,CATEGORY_COLOR_MAP
+from scenes import ImageScene, ImageView
+from graphics import DifferenceItem
+from ai import AIWorker
 
 def now_id() -> str:
     return str(int(time.time() * 1000))
 
-
-def _round_half_up(x: float) -> int:
-    # 与 round() 的 bankers rounding 不同，这里 0.5 -> 1，1.5 -> 2，更稳定
-    return int(math.floor(x + 0.5))
-
-def _quantize_roi(x: float, y: float, w: float, h: float, W: int, H: int):
-    l = max(0, min(W-1, _round_half_up(x)))
-    t = max(0, min(H-1, _round_half_up(y)))
-    qw = max(1, min(W - l, _round_half_up(w)))
-    qh = max(1, min(H - t, _round_half_up(h)))
-    return l, t, qw, qh
-
-def _make_rect_feather_alpha8(w: int, h: int, f: int) -> QtGui.QImage:
-    """生成矩形四周羽化的 Alpha8 掩膜，中心=255，边缘渐变到0"""
-    f = max(1, min(f, (w // 2) - 1 if w >= 4 else 1, (h // 2) - 1 if h >= 4 else 1))
-    alpha = QtGui.QImage(w, h, QtGui.QImage.Format_Alpha8)
-    alpha.fill(0)
-
-    p = QtGui.QPainter(alpha)
-    p.setPen(QtCore.Qt.NoPen)
-
-    # 中心不透明
-    inner = QtCore.QRect(f, f, max(0, w - 2*f), max(0, h - 2*f))
-    if inner.width() > 0 and inner.height() > 0:
-        p.fillRect(inner, QtGui.QColor(0, 0, 0, 255))
-
-    # 四边线性渐变（在 Alpha8 下，颜色的 alpha 用作像素值）
-    # Top
-    g = QtGui.QLinearGradient(0, 0, 0, f)
-    g.setColorAt(0.0, QtGui.QColor(0, 0, 0, 0))
-    g.setColorAt(1.0, QtGui.QColor(0, 0, 0, 255))
-    p.fillRect(QtCore.QRect(0, 0, w, f), QtGui.QBrush(g))
-    # Bottom
-    g = QtGui.QLinearGradient(0, h - f, 0, h)
-    g.setColorAt(0.0, QtGui.QColor(0, 0, 0, 255))
-    g.setColorAt(1.0, QtGui.QColor(0, 0, 0, 0))
-    p.fillRect(QtCore.QRect(0, h - f, w, f), QtGui.QBrush(g))
-    # Left
-    g = QtGui.QLinearGradient(0, 0, f, 0)
-    g.setColorAt(0.0, QtGui.QColor(0, 0, 0, 0))
-    g.setColorAt(1.0, QtGui.QColor(0, 0, 0, 255))
-    p.fillRect(QtCore.QRect(0, 0, f, h), QtGui.QBrush(g))
-    # Right
-    g = QtGui.QLinearGradient(w - f, 0, w, 0)
-    g.setColorAt(0.0, QtGui.QColor(0, 0, 0, 255))
-    g.setColorAt(1.0, QtGui.QColor(0, 0, 0, 0))
-    p.fillRect(QtCore.QRect(w - f, 0, f, h), QtGui.QBrush(g))
-
-    # 四角径向渐变补齐
-    for cx, cy in ((f, f), (w - f, f), (f, h - f), (w - f, h - f)):
-        rg = QtGui.QRadialGradient(cx, cy, f)
-        rg.setColorAt(0.0, QtGui.QColor(0, 0, 0, 255))
-        rg.setColorAt(1.0, QtGui.QColor(0, 0, 0, 0))
-        p.setBrush(QtGui.QBrush(rg))
-        p.drawEllipse(QtCore.QRect(cx - f, cy - f, 2*f, 2*f))
-
-    p.end()
-    return alpha
-
-
-def _apply_alpha_straight(patch: QtGui.QImage, alpha8: QtGui.QImage) -> QtGui.QImage:
-    """
-    只替换 Alpha 通道，RGB 不变（避免“发灰”）。
-    要求 patch 和 alpha8 同宽高。
-    """
-    w, h = patch.width(), patch.height()
-    # 使用非预乘格式，保证 RGB 不被乘暗
-    out = patch.convertToFormat(QtGui.QImage.Format_ARGB32)
-
-    # 逐像素写 alpha（简洁版，足够快，因为 ROI 一般不大）
-    for y in range(h):
-        a_ptr = alpha8.constScanLine(y)
-        # ARGB32 在小端内存是 BGRA 顺序
-        px = out.scanLine(y)
-        # 将 memoryview 转成 bytearray 便于写 alpha
-        row = bytearray(px)  # BGRA BGRA ...
-        arow = bytes(a_ptr)
-        # 每4字节一像素，把第4个字节(索引3)替换为 alpha
-        for x in range(w):
-            row[4*x + 3] = arow[x]
-        # 回写
-        mv = memoryview(px)
-        mv[:len(row)] = row
-
-    return out
-
-
-def _alpha_paste_no_resize_cv(src: np.ndarray, dst: np.ndarray, x: int, y: int) -> None:
-    """
-    src: BGR 或 BGRA(带alpha)；dst: BGR
-    不缩放；若越界自动裁剪；在 (x, y) 处贴入。
-    """
-    if src is None or dst is None:
-        return
-    sh, sw = src.shape[:2]
-    dh, dw = dst.shape[:2]
-
-    # 计算dst上的有效区域
-    dx1 = max(0, min(x, dw))
-    dy1 = max(0, min(y, dh))
-    dx2 = max(0, min(x + sw, dw))
-    dy2 = max(0, min(y + sh, dh))
-    if dx2 <= dx1 or dy2 <= dy1:
-        return
-
-    # 对应src的裁剪起点
-    sx1 = dx1 - x
-    sy1 = dy1 - y
-    sx2 = sx1 + (dx2 - dx1)
-    sy2 = sy1 + (dy2 - dy1)
-
-    src_roi = src[sy1:sy2, sx1:sx2]
-    dst_roi = dst[dy1:dy2, dx1:dx2]
-    # 目标的前三通道参与混合
-    dst_rgb = dst_roi[..., :3].astype(np.float32)
-
-    if src_roi.shape[2] == 4:
-        src_rgb = src_roi[..., :3].astype(np.float32)
-        alpha   = (src_roi[..., 3:4].astype(np.float32)) / 255.0
-        out_rgb = src_rgb * alpha + dst_rgb * (1.0 - alpha)
-        dst_roi[..., :3] = out_rgb.astype(dst_roi.dtype)
-
-        # 可选：如果目标是 BGRA，可更新 A（预乘/直 alpha 任选其一；这里给直 alpha 的合成）
-        if dst_roi.shape[2] == 4:
-            dst_a = dst_roi[..., 3:4].astype(np.float32) / 255.0
-            out_a = alpha + dst_a * (1.0 - alpha)
-            dst_roi[..., 3] = (out_a * 255.0).astype(dst_roi.dtype).squeeze()
-    else:
-        # 无 alpha 直接覆盖
-        dst_roi[..., :3] = src_roi[..., :3]
-
-def _to_bgr(img: np.ndarray, bg_bgr=(255, 255, 255)) -> np.ndarray:
-    """把可能的 BGRA 转成 BGR，并在给定背景色上做 alpha 合成。"""
-    if img is None:
-        return None
-    if img.ndim == 2:
-        img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
-    if img.shape[2] == 3:
-        return img
-    if img.shape[2] == 4:
-        bgr = img[..., :3].astype(np.float32)
-        a = (img[..., 3:4].astype(np.float32)) / 255.0
-        bg = np.full_like(bgr, bg_bgr, dtype=np.float32)
-        out = bgr * a + bg * (1.0 - a)
-        return out.astype(np.uint8)
-    return img
-
-def compose_pin_layout(
-    origin_bgr: np.ndarray,
-    up_bgr: np.ndarray,
-    down_bgr: np.ndarray,
-    out_path: str,
-    margin: int = 40,
-    gap: int = 24,
-    bg_bgr=(255, 255, 255),
-) -> str:
-    """
-    生成“倒品”字形拼图（不缩放）：
-      顶部：origin 居中
-      底部：up、down 左右并排
-    画布大小按内容自适应：宽 = max(origin_w, up_w + gap + down_w) + 2*margin
-                         高 = margin + origin_h + gap + max(up_h, down_h) + margin
-    """
-    o = _to_bgr(origin_bgr, bg_bgr)
-    u = _to_bgr(up_bgr, bg_bgr)
-    d = _to_bgr(down_bgr, bg_bgr)
-
-    oh, ow = o.shape[:2]
-    uh, uw = u.shape[:2]
-    dh, dw = d.shape[:2]
-
-    inner_w = max(ow, uw + gap + dw)
-    inner_h = oh + gap + max(uh, dh)
-
-    canvas_w = inner_w + 2 * margin
-    canvas_h = inner_h + 2 * margin
-
-    canvas = np.full((canvas_h, canvas_w, 3), bg_bgr, dtype=np.uint8)
-
-
-    # 顶部 up 和 down 左右并排
-    top_y = margin
-    up_x = margin
-    canvas[top_y:top_y+uh, up_x:up_x+uw] = u
-
-    down_x = margin + uw + gap
-    canvas[top_y:top_y+dh, down_x:down_x+dw] = d
-
-    # 底部 origin 居中
-    origin_y = top_y + uh + gap
-    origin_x = margin + (inner_w - ow) // 2
-    canvas[origin_y:origin_y+oh, origin_x:origin_x+ow] = o
-
-    _imwrite_any(out_path, canvas)
-    return out_path
-
-def _imread_any(path: str, flags=cv2.IMREAD_UNCHANGED):
-    """稳读任意路径（含中文/空格/长路径）"""
-    try:
-        # 归一化 & 长路径前缀（极端长路径时）
-        p = os.path.normpath(path)
-        if len(p) >= 255 and not p.startswith("\\\\?\\"):
-            p = "\\\\?\\" + os.path.abspath(p)
-        arr = np.fromfile(p, dtype=np.uint8)  # 不经由 C 的窄字符路径
-        if arr.size == 0:
-            return None
-        return cv2.imdecode(arr, flags)
-    except Exception:
-        return None
-
-def _imwrite_any(path: str, img: np.ndarray) -> bool:
-    """稳写任意路径（含中文/空格/长路径）"""
-    try:
-        ext = os.path.splitext(path)[1] or ".png"
-        ok, buf = cv2.imencode(ext, img)
-        if not ok:
-            return False
-        p = os.path.normpath(path)
-        if len(p) >= 255 and not p.startswith("\\\\?\\"):
-            p = "\\\\?\\" + os.path.abspath(p)
-        buf.tofile(p)
-        return True
-    except Exception:
-        return False
-
-class ImageEditRequester:
-    def __init__(self, image_path: str, image_bytes: bytes, mask_bytes:bytes, prompt: str):
-        self.image_path = image_path
-        self.image_bytes = image_bytes
-        self.mask_bytes = mask_bytes
-        self.prompt = prompt
-        self.BASE_URL = "https://ai.t8star.cn/"
-        # 建议在系统环境变量中设置 BANANA_API_KEY，避免把密钥写入代码库
-        self.API_KEY = "sk-RX5FUdtuNTfQvr3LAOsDsL7OdkJZxf7DIhQ73Gfqj7yq50ZO"
-        self.MODEL = "nano-banana"
-        self.url = f"{self.BASE_URL}/v1/images/edits"
-        self.headers = {
-            'Authorization': f'Bearer {self.API_KEY}'
-        }
-
-    def send_request(self) -> bytes:
-        # 记录原始图片尺寸
-        files = [
-            ('image', ('input.png', io.BytesIO(self.image_bytes), 'image/png')),
-            ('mask', ('mask.png', io.BytesIO(self.mask_bytes), "image/png")),
-        ]
-        prop = (
-            "任务设定：我从一张大图裁出 ROI 放到固定画布中央；"
-            "画布的非编辑区已是纯白(255,255,255,255)。\n"
-            "遮罩规范（务必遵守）：\n"
-            "• mask 仅用作选择：透明像素=允许编辑；不透明像素=禁止编辑；不得对 mask 本身做任何绘制或改动。\n"
-            "• 只在『image』图像中与 mask 透明区域对应的像素内进行修改；"
-            "严禁改变位置/大小/边界对齐；禁止外扩或羽化边缘。\n"
-            "• 非编辑区必须与输入像素完全一致（保持纯白 255,255,255,255），"
-            "不得新增阴影/纹理/噪声/描边。\n"
-            "• 保持几何与透视不变，仅做必要内容替换或修饰，尽量保持原有结构线条。\n"
-            "输出要求：返回整张 PNG；非编辑区需为不透明白色(Alpha=255)；禁止透明背景与棋盘格效果。\n"
-            f"任务内容：{self.prompt}"
-        )
-        payload = {
-            'model': self.MODEL,
-            'prompt': prop,
-            'response_format': 'b64_json',
-            # 'aspect_ratio': '4:3',
-            'size': f"{CANVAS_W}x{CANVAS_H}",
-        }
-        response = requests.request("POST", self.url, headers=self.headers, data=payload, files=files)
-
-        try:
-            resp_json = response.json()
-        except Exception:
-            raise RuntimeError(f"AI返回非JSON: {response.text[:200]}")
-
-        if 'data' not in resp_json or not resp_json['data']:
-            raise RuntimeError("AI返回数据为空")
-
-        data0 = resp_json['data'][0]
-        b64img = data0.get('b64_json')
-        if b64img:
-            # 兼容 data url 前缀
-            if b64img.startswith('data:image'):
-                b64img = b64img.split(',', 1)[-1]
-            b64img = ''.join(b64img.split())
-            # 修复base64 padding
-            missing_padding = len(b64img) % 4
-            if missing_padding:
-                b64img += '=' * (4 - missing_padding)
-            img_bytes = base64.b64decode(b64img)
-
-        elif 'url' in data0:
-            img_url = data0['url']
-            img_resp = requests.get(img_url)
-            img_bytes = img_resp.content
-        else:
-            raise RuntimeError("AI未返回b64或url")
-
-        return img_bytes
-        # # 保证输出尺寸一致
-        # with Image.open(out_path) as out_img:
-        #     if out_img.size != (width, height):
-        #         out_img = out_img.resize((width, height), Image.LANCZOS)
-        #         out_img.save(out_path)
-
-class HandleItem(QtWidgets.QGraphicsEllipseItem):
-    def __init__(self, size: float = 12.0, owner: Optional['DifferenceRectItem'] = None, index: int = 0):
-        super().__init__(-size / 2, -size / 2, size, size)
-        self.owner = owner
-        self.index = index
-        # solid red dot
-        self.setBrush(QtGui.QBrush(QtGui.QColor('#d32f2f')))
-        self.setPen(QtGui.QPen(QtCore.Qt.NoPen))
-        self.setFlag(QtWidgets.QGraphicsItem.ItemIsMovable, True)
-        self.setFlag(QtWidgets.QGraphicsItem.ItemIgnoresTransformations, True)
-        self.setAcceptedMouseButtons(QtCore.Qt.LeftButton)
-        # directional cursors by corner
-        if index in (0, 2):
-            self.setCursor(QtCore.Qt.SizeFDiagCursor)
-        else:
-            self.setCursor(QtCore.Qt.SizeBDiagCursor)
-        self.setZValue(10)
-
-    def mouseMoveEvent(self, event: 'QtWidgets.QGraphicsSceneMouseEvent') -> None:
-        global ENABLE_MOUSE
-        if not ENABLE_MOUSE :
-            event.accept()
-            return
-        
-        super().mouseMoveEvent(event)
-        if self.owner is not None:
-            try:
-                # use scene position mapped to parent's local to avoid drift
-                p_local = self.owner.mapFromScene(event.scenePos())
-                self.owner.on_handle_moved(self.index, p_local)
-            except Exception:
-                pass
-
-    def mousePressEvent(self, event: 'QtWidgets.QGraphicsSceneMouseEvent') -> None:
-        global ENABLE_MOUSE
-        if not ENABLE_MOUSE :
-            event.accept()
-            return
-        # For handle drag,不要更改选择状态，避免触发选中后的移动/缩放逻辑
-        super().mousePressEvent(event)
-
-
-class CircleItem(QtWidgets.QGraphicsEllipseItem):
-    def __init__(self, owner: 'DifferenceRectItem'):
-        super().__init__(0, 0, 10, 10)
-        self.owner = owner
-        # do not grab mouse press; parent处理拖动
-        self.setAcceptedMouseButtons(QtCore.Qt.NoButton)
-        # hover for highlight
-        self.setAcceptHoverEvents(True)
-
-    def hoverEnterEvent(self, event: 'QtWidgets.QGraphicsSceneHoverEvent') -> None:
-        global ENABLE_MOUSE
-        if not ENABLE_MOUSE :
-            event.accept()
-            return
-        # 禁用圆的 hover 高亮，仅设置光标
-        self.setCursor(QtCore.Qt.OpenHandCursor)
-        super().hoverEnterEvent(event)
-
-    def hoverLeaveEvent(self, event: 'QtWidgets.QGraphicsSceneHoverEvent') -> None:
-        global ENABLE_MOUSE
-        if not ENABLE_MOUSE :
-            event.accept()
-            return
-        # 禁用圆的 hover 高亮恢复
-        super().hoverLeaveEvent(event)
-
-    def hoverMoveEvent(self, event: 'QtWidgets.QGraphicsSceneHoverEvent') -> None:
-        global ENABLE_MOUSE
-        if not ENABLE_MOUSE :
-            event.accept()
-            return
-        # 在圆内移动，仅保持手形光标，不做其他处理
-        self.setCursor(QtCore.Qt.OpenHandCursor)
-        super().hoverMoveEvent(event)
-
-    def set_temp_highlight(self, enabled: bool) -> None:
-        # Reference-counted highlight so list-hover与鼠标悬停可叠加
-        if enabled:
-            if self._hl_refcount == 0:
-                self._hl_prev_pen = QtGui.QPen(self.pen())
-                self._hl_prev_brush = QtGui.QBrush(self.brush())
-                pen = QtGui.QPen(QtGui.QColor('#ff1744'))
-                pen.setWidth(5)
-                self.setPen(pen)
-                # 置为1，避免 hoverMove 反复叠加
-                self._hl_refcount = 1
-            else:
-                if self._hl_refcount > 0:
-                    # 直接清零，确保一次取消即可恢复
-                    self._hl_refcount = 0
-                    if self._hl_prev_pen is not None:
-                        self.setPen(self._hl_prev_pen)
-                    if self._hl_prev_brush is not None:
-                        self.setBrush(self._hl_prev_brush)
-
-
-class DifferenceRectItem(QtWidgets.QGraphicsRectItem):
-    def __init__(self, diff: Difference, color: QtGui.QColor, on_change=None, is_up: bool = True):
-        # keep local rect anchored at (0,0), use item position for top-left
-        super().__init__(QtCore.QRectF(0, 0, diff.width, diff.height))
-        self.diff = diff
-        self.color = color
-        self.is_up = is_up
-        self._adjustingPosition = False
-        self._initializing = True
-        self._on_change_cb = on_change
-        # rectangle: red stroke, semi-transparent fill
-        self.setBrush(QtGui.QBrush(QtGui.QColor(255, 0, 0, 40)))
-        pen = QtGui.QPen(QtGui.QColor('#c62828'))
-        pen.setWidth(2)
-        self.setPen(pen)
-        # Allow default move; we'll clamp in itemChange
-        self.setFlag(QtWidgets.QGraphicsItem.ItemIsMovable, True)
-        # Disable Qt selection state to decouple"选中"与拖动/拉伸
-        self.setFlag(QtWidgets.QGraphicsItem.ItemIsSelectable, False)
-        self.setFlag(QtWidgets.QGraphicsItem.ItemSendsGeometryChanges, True)
-        self.setZValue(1)
-        self.setAcceptedMouseButtons(QtCore.Qt.LeftButton)
-        self.setAcceptHoverEvents(True)
-        # drag state
-        self._dragging = False
-        self._drag_mode = 'none'  # 'move' or 'resize' or 'circle'
-        self._resize_index = -1   # 0 tl,1 tr,2 br,3 bl
-        self._move_start_pos_scene = QtCore.QPointF(0, 0)
-        self._item_start_pos = QtCore.QPointF(0, 0)
-        self._anchor_scene = QtCore.QPointF(0, 0)
-        self._suppress_sync = False
-        self._edge_index: str = ''  # 'L','R','T','B' 
-        self._edge_thresh: float = 8.0
-        # handles at corners: tl, tr, br, bl
-        self.handles = [HandleItem(9.0, owner=self, index=i) for i in range(4)]
-        for h in self.handles:
-            h.setParentItem(self)
-
-        # hint circle (inscribed)
-        self.circle_item = CircleItem(owner=self)
-        self.circle_item.setParentItem(self)
-        self.circle_item.setBrush(QtGui.QBrush(QtCore.Qt.transparent))
-        circle_pen = QtGui.QPen(QtGui.QColor('#00c853'))
-        circle_pen.setWidth(3)
-        self.circle_item.setPen(circle_pen)
-        # ensure circle draws above rectangle fill
-        self.circle_item.setZValue(3)
-        # text drawn inside circle, colored by category
-        self.circle_text = QtWidgets.QGraphicsTextItem("", self)
-        self.circle_text.setZValue(5)
-        self.circle_text.setFlag(QtWidgets.QGraphicsItem.ItemIgnoresTransformations, False)
-        self.circle_text.setAcceptHoverEvents(False)
-        self.circle_text.setAcceptedMouseButtons(QtCore.Qt.NoButton)
-        self.update_handles()
-
-        # set initial position to top-left (after handles exist to avoid early callbacks)
-        self.setPos(self.diff.x, self.diff.y)
-        self._initializing = False
-
-        self._hl_refcount: int = 0
-        self._hl_prev_pen: Optional[QtGui.QPen] = None
-        self._hl_prev_brush: Optional[QtGui.QBrush] = None
-        self._hl_prev_circle_pen: Optional[QtGui.QPen] = None
-        self._hl_prev_opacity: float = self.opacity()
-        self._hl_prev_z: float = self.zValue()
-
-    def _layout_circle_text(self, cx: float, cy: float, radius: float) -> None:
-        # 使用 QGraphicsTextItem 支持自动换行；字号自适应到最大；必要时省略号
-        cr = self.circle_item.rect()
-        cx, cy = cr.center().x(), cr.center().y()
-        radius = cr.width() / 2.0
-        text = (self.diff.label or "").strip()
-        if not text:
-            self.circle_text.setVisible(False)
-            return
-        max_w = radius * 2.0 * 0.92
-        max_h = radius * 2.0 * 0.9
-        self.circle_text.setTextWidth(max_w)
-        font = QtGui.QFont(self.circle_text.font())
-        min_pt = 10
-        max_pt = int(radius * 0.9) if radius > 12 else 14
-        if max_pt < min_pt:
-            max_pt = min_pt
-        best_pt = min_pt
-        # 递增找到能放下的最大字号
-        for pt in range(min_pt, max_pt + 1):
-            font.setPointSize(pt)
-            self.circle_text.setFont(font)
-            self.circle_text.setPlainText(text)
-            br = self.circle_text.boundingRect()
-            if br.height() <= max_h:
-                best_pt = pt
-            else:
-                break
-        font.setPointSize(best_pt)
-        self.circle_text.setFont(font)
-        self.circle_text.setPlainText(text)
-        br = self.circle_text.boundingRect()
-        # 若最小字号仍超高，则截断并加省略号
-        if br.height() > max_h:
-            s = text
-            while len(s) > 1:
-                s = s[:-1]
-                self.circle_text.setPlainText(s + "…")
-                br = self.circle_text.boundingRect()
-                if br.height() <= max_h:
-                    break
-        # 居中并作细微上移矫正（基线偏差）
-        dy = -0.05 * br.height()
-        self.circle_text.setPos(cx - br.width() / 2.0, cy - br.height() / 2.0 + dy)
-        color_cat = CATEGORY_COLOR_MAP.get(self.diff.category, QtGui.QColor('#ff0000'))
-        self.circle_text.setDefaultTextColor(color_cat)
-
-    def set_label_visible(self, visible: bool) -> None:
-        isup = self.diff.section == 'up'
-        vis = isup == self.is_up
-        self.circle_text.setVisible(visible and vis)
-
-    def update_label(self) -> None:
-        cr = self.circle_item.rect()
-        cx, cy = cr.center().x(), cr.center().y()
-        radius = cr.width() / 2.0
-        self._layout_circle_text(cx, cy, radius)
-
-    def update_handles(self) -> None:
-        r = self.rect()
-        # handles may not be ready during very early lifecycle
-        if not hasattr(self, 'handles') or not self.handles:
-            return
-        self.handles[0].setPos(r.topLeft())
-        self.handles[1].setPos(r.topRight())
-        self.handles[2].setPos(r.bottomRight())
-        self.handles[3].setPos(r.bottomLeft())
-
-        # update hint circle using discrete radius levels (auto), place center (draggable)
-        size = min(max(1.0, r.width()), max(1.0, r.height()))
-        max_half = size / 2.0
-        # auto: pick largest discrete radius that fits; fallback to max_half when too small
-        allowed = [lvl for lvl in RADIUS_LEVELS if lvl <= max_half-10]
-        is_up = True  # this item draws both views; choose fields based on section when used
-        # choose state fields per section by checking owner context via label (section not stored on item)
-        # Infer by default using diff.section for label text placement
-        if allowed:
-            radius = float(allowed[-1])
-            self.diff.hint_level = len(allowed)
-        else:
-            radius = max_half
-            self.diff.hint_level = 1
-
-        # center: use stored local center if any, else rect center; clamp into rect with current radius
-        cx = self.diff.cx if self.diff.cx >= 0 else r.width() / 2.0
-        cy = self.diff.cy if self.diff.cy >= 0 else r.height() / 2.0
-        cx = max(radius, min(cx, r.width() - radius))
-        cy = max(radius, min(cy, r.height() - radius))
-        self.diff.cx = cx
-        self.diff.cy = cy
-        self.circle_item.setRect(cx - radius, cy - radius, radius * 2.0, radius * 2.0)
-        # update label
-        self._layout_circle_text(cx, cy, radius)
-
-    def mousePressEvent(self, event: QtWidgets.QGraphicsSceneMouseEvent) -> None:
-        global ENABLE_MOUSE
-        if not ENABLE_MOUSE :
-            event.accept()
-            return
-        pos = event.pos()
-        r = self.rect()
-        corners = [r.topLeft(), r.topRight(), r.bottomRight(), r.bottomLeft()]
-        thresh = 14.0
-        clicked_corner = -1
-        for idx, c in enumerate(corners):
-            if QtCore.QLineF(pos, c).length() <= thresh:
-                clicked_corner = idx
-                break
-
-        # 如果启用了可选中，才执行"先选中后操作"的逻辑；当前已禁用选择，此分支不会触发
-        if (self.flags() & QtWidgets.QGraphicsItem.ItemIsSelectable) and event.button() == QtCore.Qt.LeftButton and self.scene() is not None and not self.isSelected():
-            self.scene().clearSelection()
-            self.setSelected(True)
-            event.accept()
-            return
-
-        # circle drag detection first（convert pos to circle's local coords）
-        p_in_circle = self.circle_item.mapFromItem(self, pos)
-        if self.circle_item.shape().contains(p_in_circle):
-            self._dragging = True
-            self._drag_mode = 'circle'
-            self._suppress_sync = True
-            # avoid rectangle moving while dragging circle
-            self.setFlag(QtWidgets.QGraphicsItem.ItemIsMovable, False)
-            event.accept()
-            return
-
-        if clicked_corner >= 0:
-            self._dragging = True
-            self._drag_mode = 'resize'
-            self._resize_index = clicked_corner
-            opp = corners[(clicked_corner + 2) % 4]
-            self._anchor_scene = self.mapToScene(opp)
-            self._suppress_sync = True
-            # prevent default item move while resizing via handle
-            self.setFlag(QtWidgets.QGraphicsItem.ItemIsMovable, False)
-            event.accept()
-            return
-
-        # edge drag detection (resize one side)
-        edge_thresh = self._edge_thresh
-        left_hit = 0 <= pos.y() <= r.height() and abs(pos.x() - 0.0) <= edge_thresh
-        right_hit = 0 <= pos.y() <= r.height() and abs(pos.x() - r.width()) <= edge_thresh
-        top_hit = 0 <= pos.x() <= r.width() and abs(pos.y() - 0.0) <= edge_thresh
-        bottom_hit = 0 <= pos.x() <= r.width() and abs(pos.y() - r.height()) <= edge_thresh
-        if left_hit or right_hit or top_hit or bottom_hit:
-            self._dragging = True
-            self._drag_mode = 'edge'
-            self._edge_index = 'L' if left_hit else ('R' if right_hit else ('T' if top_hit else 'B'))
-            self._suppress_sync = True
-            self.setFlag(QtWidgets.QGraphicsItem.ItemIsMovable, False)
-            event.accept()
-            return
-
-        # default move handled by QGraphicsView; don't intercept to keep it smooth
-        self._dragging = False
-        self._drag_mode = 'none'
-        super().mousePressEvent(event)
-
-    def mouseMoveEvent(self, event: QtWidgets.QGraphicsSceneMouseEvent) -> None:
-        global ENABLE_MOUSE
-        if not ENABLE_MOUSE :
-            event.accept()
-            return
-
-        if not self._dragging:
-            return super().mouseMoveEvent(event)
-        scene_rect = self.scene().sceneRect() if self.scene() else QtCore.QRectF(0, 0, 1e6, 1e6)
-        # Default move path is handled by base class; only handle resize/circle below
-        if self._drag_mode == 'resize':
-            p_scene = event.scenePos()
-            p_scene.setX(max(scene_rect.left(), min(p_scene.x(), scene_rect.right())))
-            p_scene.setY(max(scene_rect.top(), min(p_scene.y(), scene_rect.bottom())))
-            tl = QtCore.QPointF(min(self._anchor_scene.x(), p_scene.x()),
-                                min(self._anchor_scene.y(), p_scene.y()))
-            br = QtCore.QPointF(max(self._anchor_scene.x(), p_scene.x()),
-                                max(self._anchor_scene.y(), p_scene.y()))
-            new_w = max(MIN_RECT_SIZE, br.x() - tl.x())
-            new_h = max(MIN_RECT_SIZE, br.y() - tl.y())
-            self.setPos(tl)
-            self.setRect(QtCore.QRectF(0, 0, new_w, new_h))
-            self._update_diff_from_item()
-            self.update_handles()
-            event.accept()
-            return
-
-        if self._drag_mode == 'edge':
-            # resize only one side based on which edge is grabbed
-            r = QtCore.QRectF(self.rect())
-            p_local = event.pos()
-            new_r = QtCore.QRectF(r)
-            if self._edge_index == 'L':
-                new_r.setLeft(p_local.x())
-            elif self._edge_index == 'R':
-                new_r.setRight(p_local.x())
-            elif self._edge_index == 'T':
-                new_r.setTop(p_local.y())
-            elif self._edge_index == 'B':
-                new_r.setBottom(p_local.y())
-
-            new_left = min(new_r.left(), new_r.right())
-            new_top = min(new_r.top(), new_r.bottom())
-            new_w = max(MIN_RECT_SIZE, abs(new_r.width()))
-            new_h = max(MIN_RECT_SIZE, abs(new_r.height()))
-            scene_rect = self.scene().sceneRect() if self.scene() else QtCore.QRectF(-1e6, -1e6, 2e6, 2e6)
-            proposed_pos = self.pos() + QtCore.QPointF(new_left, new_top)
-            clamped_x = max(scene_rect.left(), min(proposed_pos.x(), scene_rect.right()))
-            clamped_y = max(scene_rect.top(), min(proposed_pos.y(), scene_rect.bottom()))
-            max_w = max(MIN_RECT_SIZE, scene_rect.right() - clamped_x)
-            max_h = max(MIN_RECT_SIZE, scene_rect.bottom() - clamped_y)
-            new_w = min(new_w, max_w)
-            new_h = min(new_h, max_h)
-            self.setPos(QtCore.QPointF(clamped_x, clamped_y))
-            self.setRect(QtCore.QRectF(0, 0, new_w, new_h))
-            self._update_diff_from_item()
-            self.update_handles()
-            event.accept()
-            return
-
-        if self._drag_mode == 'circle':
-            r = self.rect()
-            cr = self.circle_item.rect()
-            radius = cr.width() / 2.0
-            local = event.pos()
-            cx = max(radius, min(local.x(), r.width() - radius))
-            cy = max(radius, min(local.y(), r.height() - radius))
-            self.diff.cx = cx
-            self.diff.cy = cy
-            self.circle_item.setRect(cx - radius, cy - radius, radius * 2.0, radius * 2.0)
-            # move label with circle
-            self._layout_circle_text(cx, cy, radius)
-            # 仅更新本项的标签布局，不立即全局同步
-            event.accept()
-            return
-
-    def mouseReleaseEvent(self, event: QtWidgets.QGraphicsSceneMouseEvent) -> None:
-        global ENABLE_MOUSE
-        if not ENABLE_MOUSE :
-            event.accept()
-            return
-        self._dragging = False
-        self._drag_mode = 'none'
-        self._resize_index = -1
-        # after finishing resize, sync once
-        if self._suppress_sync:
-            self._suppress_sync = False
-            # 在释放时同步一次（另一侧矩形、列表、AI overlay）
-            self._notify_change()
-        # restore default movable flag
-        self.setFlag(QtWidgets.QGraphicsItem.ItemIsMovable, True)
-        return super().mouseReleaseEvent(event)
-
-    def hoverMoveEvent(self, event: 'QtWidgets.QGraphicsSceneHoverEvent') -> None:
-        global ENABLE_MOUSE
-        if not ENABLE_MOUSE :
-            event.accept()
-            return
-        # set cursors only when矩形区域可见；否则使用默认箭头，不改变笔刷（避免出现外框）
-        r = self.rect()
-        pos = event.pos()
-        edge_thresh = self._edge_thresh
-        # 当区域隐藏时，避免高亮与光标提示
-        if not self.acceptHoverEvents() or self.pen().style() == QtCore.Qt.NoPen:
-            self.unsetCursor()
-            return super().hoverMoveEvent(event)
-        # 禁用矩形 hover 高亮
-        # corners
-        near_tl = QtCore.QLineF(pos, r.topLeft()).length() <= 12
-        near_tr = QtCore.QLineF(pos, r.topRight()).length() <= 12
-        near_br = QtCore.QLineF(pos, r.bottomRight()).length() <= 12
-        near_bl = QtCore.QLineF(pos, r.bottomLeft()).length() <= 12
-        if near_tl or near_br:
-            self.setCursor(QtCore.Qt.SizeFDiagCursor)
-        elif near_tr or near_bl:
-            self.setCursor(QtCore.Qt.SizeBDiagCursor)
-        elif abs(pos.x() - 0.0) <= edge_thresh or abs(pos.x() - r.width()) <= edge_thresh:
-            self.setCursor(QtCore.Qt.SizeHorCursor)
-        elif abs(pos.y() - 0.0) <= edge_thresh or abs(pos.y() - r.height()) <= edge_thresh:
-            self.setCursor(QtCore.Qt.SizeVerCursor)
-        else:
-            self.setCursor(QtCore.Qt.OpenHandCursor)
-        super().hoverMoveEvent(event)
-
-    def hoverLeaveEvent(self, event: 'QtWidgets.QGraphicsSceneHoverEvent') -> None:
-        global ENABLE_MOUSE
-        if not ENABLE_MOUSE :
-            event.accept()
-            return
-        # 仅当当前笔可见时才恢复细边框；否则保持 NoPen
-        if self.pen().style() != QtCore.Qt.NoPen:
-            self._hover_in_circle = False
-            self.set_temp_highlight(False)
-        self.unsetCursor()
-        super().hoverLeaveEvent(event)
-
-    def itemChange(self, change: 'QtWidgets.QGraphicsItem.GraphicsItemChange', value):
-        # Clamp movement within scene rect and sync geometry after movement
-        if change == QtWidgets.QGraphicsItem.ItemPositionChange and self.scene() is not None:
-            new_pos: QtCore.QPointF = value
-            r = self.rect()
-            scene_rect = self.scene().sceneRect()
-            new_x = max(scene_rect.left(), min(new_pos.x(), scene_rect.right() - r.width()))
-            new_y = max(scene_rect.top(), min(new_pos.y(), scene_rect.bottom() - r.height()))
-            return QtCore.QPointF(new_x, new_y)
-        if self._initializing:
-            return super().itemChange(change, value)
-        if change == QtWidgets.QGraphicsItem.ItemPositionHasChanged and not self._adjustingPosition:
-            self._update_diff_from_item()
-            self.update_handles()
-            if not getattr(self, '_suppress_sync', False):
-                self._notify_change()
-        return super().itemChange(change, value)
-
-    def _notify_change(self) -> None:
-        if callable(self._on_change_cb):
-            try:
-                self._on_change_cb(self.diff.id)
-            except Exception:
-                pass
-
-    def _update_diff_from_item(self) -> None:
-        # absolute top-left is item position + local rect top-left (kept at 0,0)
-        r = self.rect()
-        p = self.pos()
-        self.diff.x = p.x() + r.x()
-        self.diff.y = p.y() + r.y()
-        self.diff.width = r.width()
-        self.diff.height = r.height()
-
-    def on_handle_moved(self, idx: int, p: QtCore.QPointF) -> None:
-        global ENABLE_MOUSE
-        if not ENABLE_MOUSE :
-            return
-        # allow dragging outward: do not clamp p; normalize later
-        r = QtCore.QRectF(self.rect())
-        if idx == 0:  # tl
-            r.setTopLeft(p)
-        elif idx == 1:  # tr
-            r.setTopRight(p)
-        elif idx == 2:  # br
-            r.setBottomRight(p)
-        elif idx == 3:  # bl
-            r.setBottomLeft(p)
-        # normalize
-        new_left = min(r.left(), r.right())
-        new_top = min(r.top(), r.bottom())
-        new_w = max(MIN_RECT_SIZE, abs(r.width()))
-        new_h = max(MIN_RECT_SIZE, abs(r.height()))
-        # clamp against scene bounds to avoid huge jumps when pulling outward
-        scene_rect = self.scene().sceneRect() if self.scene() else QtCore.QRectF(-1e6, -1e6, 2e6, 2e6)
-        proposed_pos = self.pos() + QtCore.QPointF(new_left, new_top)
-        clamped_x = max(scene_rect.left(), min(proposed_pos.x(), scene_rect.right()))
-        clamped_y = max(scene_rect.top(), min(proposed_pos.y(), scene_rect.bottom()))
-        max_w = max(MIN_RECT_SIZE, scene_rect.right() - clamped_x)
-        max_h = max(MIN_RECT_SIZE, scene_rect.bottom() - clamped_y)
-        new_w = min(new_w, max_w)
-        new_h = min(new_h, max_h)
-        # apply
-        self.setPos(QtCore.QPointF(clamped_x, clamped_y))
-        self.setRect(QtCore.QRectF(0, 0, new_w, new_h))
-        self._update_diff_from_item()
-        self.update_handles()
-        # notify so另一侧矩形与UI同步
-        self._notify_change()
-
-    def set_temp_highlight(self, enabled: bool) -> None:
-        # Reference-counted highlight so list-hover与鼠标悬停可叠加
-        if enabled:
-            if self._hl_refcount == 0:
-                self._hl_prev_pen = QtGui.QPen(self.pen())
-                self._hl_prev_brush = QtGui.QBrush(self.brush())
-                pen = QtGui.QPen(QtGui.QColor('#ff1744'))
-                pen.setWidth(5)
-                self.setPen(pen)
-                # 置为1，避免 hoverMove 反复叠加
-                self._hl_refcount = 1
-            else:
-                if self._hl_refcount > 0:
-                    # 直接清零，确保一次取消即可恢复
-                    self._hl_refcount = 0
-                    if self._hl_prev_pen is not None:
-                        self.setPen(self._hl_prev_pen)
-                    if self._hl_prev_brush is not None:
-                        self.setBrush(self._hl_prev_brush)
-
-    def hoverEnterEvent(self, event: 'QtWidgets.QGraphicsSceneHoverEvent') -> None:
-        # 禁用进入时的矩形高亮，仅设置光标
-        global ENABLE_MOUSE
-        if not ENABLE_MOUSE :
-            event.accept()
-            return
-        if self.pen().style() != QtCore.Qt.NoPen:
-            self.setCursor(QtCore.Qt.OpenHandCursor)
-        super().hoverEnterEvent(event)
-
-
-class ImageScene(QtWidgets.QGraphicsScene):
-    def __init__(self, pixmap: QtGui.QPixmap):
-        super().__init__(0, 0, pixmap.width(), pixmap.height())
-        self.bg = QtWidgets.QGraphicsPixmapItem(pixmap)
-        self.addItem(self.bg)
-
-
-class ImageView(QtWidgets.QGraphicsView):
-    def __init__(self, scene: ImageScene):
-        super().__init__(scene)
-        self.setRenderHints(QtGui.QPainter.Antialiasing | QtGui.QPainter.SmoothPixmapTransform)
-        # 默认不使用手型拖拽，保持箭头光标
-        self.setDragMode(QtWidgets.QGraphicsView.NoDrag)
-        self.viewport().setCursor(QtCore.Qt.ArrowCursor)
-        self.setViewportUpdateMode(QtWidgets.QGraphicsView.SmartViewportUpdate)
-
-    def resizeEvent(self, event: QtGui.QResizeEvent) -> None:
-        super().resizeEvent(event)
-        self.fitInView(self.sceneRect(), QtCore.Qt.KeepAspectRatio)
-
-
 class DifferenceEditorWindow(QtWidgets.QMainWindow):
     def _set_completed_ui_disabled(self, disabled: bool):
         # 禁用保存、AI处理按钮
-        global ENABLE_MOUSE
         self.btn_save.setEnabled(not disabled)
         self.btn_submit.setEnabled(not disabled)
         self.up_side.setEnabled(not disabled)
         self.down_side.setEnabled(not disabled)
-        ENABLE_MOUSE = not disabled
 
     def __init__(self, pair, config_dir: str, parent: Optional[QtWidgets.QWidget] = None) -> None:
         super().__init__(parent)
@@ -957,8 +29,11 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
         self._add_btns = list()
 
         # load images
-        self.up_pix = QtGui.QPixmap(self.pair.up_image_path)
-        self.down_pix = QtGui.QPixmap(self.pair.down_image_path)
+        self.up_pix = QtGui.QPixmap(self.pair.image_path)
+        self.down_pix = QtGui.QPixmap(self.pair.image_path)
+        self.name = self.pair.name
+        self.ext = os.path.splitext(os.path.basename(self.pair.image_path))[1]
+
         if self.up_pix.isNull() or self.down_pix.isNull():
             QtWidgets.QMessageBox.critical(self, "加载失败", "无法加载图片")
             self.close()
@@ -1036,7 +111,6 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
                   self.toggle_regions, self.toggle_hints, self.toggle_labels, self.toggle_ai_preview]:
             bottom_layout.setAlignment(w, QtCore.Qt.AlignVCenter)
 
-        # Status bar at the very bottom to reflect meta.json status
         self.status_bar = QtWidgets.QStatusBar(self)
         self.status_bar.setSizeGripEnabled(False)
         self.setStatusBar(self.status_bar)
@@ -1055,8 +129,8 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
 
         # data
         self.differences: List[Difference] = []
-        self.rect_items_up: Dict[str, DifferenceRectItem] = {}
-        self.rect_items_down: Dict[str, DifferenceRectItem] = {}
+        self.rect_items_up: Dict[str, DifferenceItem] = {}
+        self.rect_items_down: Dict[str, DifferenceItem] = {}
         # AI 预览覆盖图层（仅当勾选 AI预览 时显示）
         self.ai_overlays_up: QtWidgets.QGraphicsPixmapItem = QtWidgets.QGraphicsPixmapItem()
         self.ai_overlays_up.setZValue(1)
@@ -1082,11 +156,10 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
         self._syncing_rect_update: bool = False
         self._syncing_selection: bool = False
         self._suppress_scene_selection: bool = False
-        self.meta_status: str = 'unsaved'
+        self.status: str = 'unsaved'
         # dirty state for title asterisk
         self._is_dirty: bool = False
-        # 默认延迟磁盘写入，仅在显式保存或AI阶段落盘
-        self._defer_disk_writes: bool = True
+        self._selected_diff_id = ""
 
         # wire
         self.btn_save.clicked.connect(self.on_save_clicked)
@@ -1103,23 +176,9 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
         self.btn_close.setStyleSheet("QPushButton{background:#6c757d;color:#fff;padding:6px 14px;border-radius:6px;border:1px solid #6c757d;} QPushButton:hover{background:#545b62;border-color:#545b62;}")
         self.total_count.setStyleSheet("color:#333;font-weight:500;")
 
-        # selection syncing between scenes and list
-        # Use bound methods (QObject slots) so they auto-disconnect when window is destroyed
-        self.up_scene.selectionChanged.connect(self._on_up_selection_changed)
-        self.down_scene.selectionChanged.connect(self._on_down_selection_changed)
-
         # initialize scenes/view
         QtCore.QTimer.singleShot(0, lambda: self.up_view.fitInView(self.up_scene.sceneRect(), QtCore.Qt.KeepAspectRatio))
         QtCore.QTimer.singleShot(0, lambda: self.down_view.fitInView(self.down_scene.sceneRect(), QtCore.Qt.KeepAspectRatio))
-        # viewport hover tracking to取消高亮
-        for view, scene in ((self.up_view, self.up_scene), (self.down_view, self.down_scene)):
-            view.setMouseTracking(True)
-            view.viewport().setMouseTracking(True)
-            def make_leave(v):
-                def _leave(ev):
-                    self._apply_list_hover_highlight(-1)
-                return _leave
-            view.viewport().leaveEvent = make_leave(view)
 
         # load existing config if exists
         self.load_existing_config()
@@ -1127,10 +186,9 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
         # initial count
         self.update_total_count()
         # initial status bar display
-        self._update_status_bar()
         self._update_window_title()
         # 若初始状态为完成，禁用交互
-        # if getattr(self, 'meta_status', None) == 'completed':
+        # if getattr(self, 'status', None) == 'completed':
         #     self._set_completed_ui_disabled(True)
 
         # Shortcut: Cmd/Ctrl+S 保存
@@ -1141,9 +199,13 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
         mark = "*" if getattr(self, '_is_dirty', False) else ""
         self.setWindowTitle(f"不同点编辑器 - {self.pair.name}{mark}")
 
-    def _update_status_bar(self, status: Optional[str] = None) -> None:
-        if status is not None:
-            self.meta_status = status
+    def _make_dirty(self) -> None:
+        self._is_dirty = True
+        self._update_window_title()
+        self._update_status('unsaved')
+
+    def _update_status(self, status: str) -> None:
+        self.status = status
         text_map = {
             'unsaved': '未保存',
             'saved': '待AI处理',
@@ -1151,13 +213,17 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
             'completed': '完成',
             'hasError': 'AI处理存在错误',
         }
-        human = text_map.get(getattr(self, 'meta_status', 'unsaved'), self.meta_status)
-        if hasattr(self, 'status_bar') and self.status_bar is not None:
-            self.status_bar.showMessage(f"状态：{human}")
+        human = text_map.get(self.status)
+        self.status_bar.showMessage(f"状态：{human}")
 
-        # 状态为完成时禁用相关交互，否则恢复
-        # self._set_completed_ui_disabled(self.meta_status == 'completed')
-
+    def update_total_count(self) -> None:
+        count = sum(1 for d in self.differences if d.enabled)
+        self.total_count.setText(f"茬点总计：{len(self.differences)}, 已勾选AI处理:{count}项")
+        # 没有茬点时，不允许进行AI处理
+        try:
+            self.btn_submit.setEnabled(count > 0)
+        except Exception:
+            pass
     # --- AI status bar progress helpers ---
     def _ai_progress_start(self, total: int) -> None:
         frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
@@ -1190,7 +256,6 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
             self.ai_spinner.setVisible(False)
             self.ai_progress.setVisible(False)
         else:
-            # status bar widgets
             self.ai_progress.setMaximum(max(1, int(total)))
             self.ai_progress.setValue(0)
             self.ai_progress.setVisible(True)
@@ -1259,27 +324,27 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
         self._cleanup_ai_thread()
         for d in self.differences:
             d.enabled = False
-        self._write_config_snapshot()
         self.rebuild_lists()
         self.update_total_count()
+
+        compose_result(self.level_dir(), self.name, self.ext, self.differences)
+        self._refresh_ai_overlays()
         if failed:
-            self._write_meta_status('hasError', persist=True)
+            self._update_status('hasError')
             QtWidgets.QMessageBox.information(self, "AI处理", "AI已完成处理, 但存在错误")
         else:
-            self._write_meta_status('completed', persist=True)
+            self._update_status('completed')
             QtWidgets.QMessageBox.information(self, "AI处理", "AI已完成处理")
+        self._write_config_snapshot()
 
-        self.export_pin_mosaic()
-        self._refresh_ai_overlays()
+        
 
     @QtCore.Slot(str)
     def _ai_slot_error(self, msg: str) -> None:
         self._ai_progress_end()
         self._cleanup_ai_thread()
         QtWidgets.QMessageBox.critical(self, "AI处理失败", msg)
-        self._write_meta_status('hasError', persist=True)
-        self.toggle_ai_preview.setChecked(False)
-        self.toggle_ai_preview.setEnabled(False)
+        self._update_status('hasError')
 
     # Side panel with tag buttons and list
     def _build_side_panel(self, section: str) -> QtWidgets.QWidget:
@@ -1311,8 +376,6 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
         # 取消 hover 同步高亮：仅保留选中高亮
         list_widget.setMouseTracking(False)
         list_widget.viewport().setMouseTracking(False)
-        list_widget.itemEntered.connect(lambda it, s=section, lw=list_widget: self._on_list_item_entered(s, lw, it))
-        list_widget.viewport().leaveEvent = lambda e, s=section: self._on_list_hover_leave(s)
         layout.addWidget(list_widget, 1)
 
         return panel
@@ -1339,6 +402,8 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
             y=rect.y(),
             width=rect.width(),
             height=rect.height(),
+            cx = rect.width() / 2,
+            cy = rect.height() / 2
         )
         self.differences.append(diff)
         self._add_rect_items(diff)
@@ -1346,261 +411,152 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
         self._make_dirty()
         self.update_total_count()
 
+
+    def _on_item_chaned(self, diff_id: str)->None:
+        self._make_dirty()
+
     def _add_rect_items(self, diff: Difference) -> None:
         color = CATEGORY_COLOR_MAP.get(diff.category, QtGui.QColor('#ff0000'))
-        item_up = DifferenceRectItem(diff, color, on_change=self.on_geometry_changed, is_up=True)
-        item_down = DifferenceRectItem(diff, color, on_change=self.on_geometry_changed, is_up=False)
+        item_up = DifferenceItem(diff, color, on_change=self._on_item_chaned, is_up=True)
+        item_down = DifferenceItem(diff, color, on_change=self._on_item_chaned, is_up=False)
         self.up_scene.addItem(item_up)
         self.down_scene.addItem(item_down)
         self.rect_items_up[diff.id] = item_up
         self.rect_items_down[diff.id] = item_down
-
-        # style when disabled
-        self._apply_enabled_style(diff)
-
-        # no Qt signals; callbacks are triggered in itemChange/mouseMoveEvent
-
-        # context menu (right-click delete)
-        def add_ctx(item: DifferenceRectItem):
-            item.setFlag(QtWidgets.QGraphicsItem.ItemIsFocusable, True)
-            item.setAcceptedMouseButtons(QtCore.Qt.AllButtons)
-            item.contextMenuEvent = lambda ev, _id=diff.id: self._on_item_context_menu(ev, _id)
-
-        add_ctx(item_up)
-        add_ctx(item_down)
-
-    def _apply_enabled_style(self, diff: Difference) -> None:
-        opacity = 1.0 if diff.visible else 0.35
-        self.rect_items_up[diff.id].setOpacity(opacity)
-        self.rect_items_down[diff.id].setOpacity(opacity)
-        # Sync visibility as well when enabled state changes
-        self._sync_item_visibility(diff)
-
-    def _set_rect_graphics_visible(self, item: DifferenceRectItem, visible_rect: bool) -> None:
-        # 控制仅"矩形外观"和"拖拽句柄"的可见性，不影响圆和文本
-        if visible_rect:
-            pen = QtGui.QPen(QtGui.QColor('#ff0000'))
-            pen.setWidth(2)
-            item.setPen(pen)
-            # 统一填充透明度，不随选中状态改变
-            item.setBrush(QtGui.QBrush(QtGui.QColor(255, 0, 0, 40)))
-        else:
-            item.setPen(QtGui.QPen(QtCore.Qt.NoPen))
-            item.setBrush(QtGui.QBrush(QtCore.Qt.transparent))
-        # handles 跟随矩形外观
-        try:
-            for h in getattr(item, 'handles', []) or []:
-                h.setVisible(visible_rect)
-        except Exception:
-            pass
-
-    def _sync_item_visibility(self, diff: Difference) -> None:
-        show_regions = self.toggle_regions.isChecked()
-        show_hints = self.toggle_hints.isChecked()
-        show_labels = self.toggle_labels.isChecked()
-        for items in (self.rect_items_up, self.rect_items_down):
-            item = items.get(diff.id)
-            if not item:
-                continue
-            # 父项是否可见仅由 enabled 决定
-            item.setVisible(diff.visible)
-            # 仅控制矩形外观
-            self._set_rect_graphics_visible(item, visible_rect=(show_regions and diff.visible))
-            # 圆与文本单独控制
-            item.circle_item.setVisible(show_hints and diff.visible)
-            vis_label = show_labels and diff.visible and bool((diff.label or '').strip())
-            item.set_label_visible(vis_label)
-
-    def on_geometry_changed(self, changed_id: Optional[str] = None) -> None:
-        # items already updated their diff; sync the counterpart geometry and labels
-        if self._syncing_rect_update:
-            return
-        try:
-            self._syncing_rect_update = True
-            self._make_dirty()
-            diffs_to_update = self.differences if not changed_id else [next((d for d in self.differences if d.id == changed_id), None)]
-            diffs_to_update = [d for d in diffs_to_update if d is not None]
-            for diff in diffs_to_update:
-                u = self.rect_items_up.get(diff.id)
-                d = self.rect_items_down.get(diff.id)
-                # --- 强制同步圆心 ---
-                if u:
-                    u.setPos(diff.x, diff.y)
-                    if u.rect().width() != diff.width or u.rect().height() != diff.height:
-                        u.setRect(QtCore.QRectF(0, 0, diff.width, diff.height))
-                    u.update_handles()  # update_handles会用diff.cx/cy
-                if d:
-                    d.setPos(diff.x, diff.y)
-                    if d.rect().width() != diff.width or d.rect().height() != diff.height:
-                        d.setRect(QtCore.QRectF(0, 0, diff.width, diff.height))
-                    d.update_handles()  # update_handles会用diff.cx/cy
-                # --- END ---
-                self._update_radius_value_for_label(diff)
-
-        finally:
-            self._syncing_rect_update = False
+        item_up.radiusChanged.connect(self._update_radius_value_for_label)
 
     def rebuild_lists(self) -> None:
-        # 1) 清空
-        for section in ('up', 'down'):
-            lw = self.current_list(section)
-            lw.clear()
+        up = self.current_list('up')
+        down = self.current_list('down')
 
-        # === 列宽配置 ===
-        # 固定列：勾选、标题、半径、开关、删除
-        COL_FIXED = {0: 18, 1: 40, 3: 50, 4: 18, 5: 15}
-        EDIT_MIN = 100                 # 输入框最小宽（可按需要调大/小）
-        HSP = 6                        # Grid 的水平间距
-        MARG = (6, 4, 6, 4)            # Grid 的边距：left, top, right, bottom
+        # ==== 屏蔽信号 + 标记重建中 ====
+        self._rebuilding = True
+        block_up = QtCore.QSignalBlocker(up)
+        block_down = QtCore.QSignalBlocker(down)
+        try:
+            # 1) 清空
+            for section in ('up', 'down'):
+                lw = self.current_list(section)
+                lw.clear()
 
-        global_idx = 1
-        for diff in self.differences:
-            lw = self.current_list(diff.section)
-            color = CATEGORY_COLOR_MAP.get(diff.category, QtGui.QColor('#ff0000'))
+            # === 列宽配置 ===
+            COL_FIXED = {0: 18, 1: 40, 3: 50, 4: 18, 5: 15}
+            EDIT_MIN = 100
+            HSP = 6
+            MARG = (6, 4, 6, 4)
 
-            item = QtWidgets.QListWidgetItem()
-            item.setData(QtCore.Qt.UserRole, diff.id)
+            global_idx = 1
+            for diff in self.differences:
+                lw = self.current_list(diff.section)
+                color = CATEGORY_COLOR_MAP.get(diff.category, QtGui.QColor('#ff0000'))
 
-            w = QtWidgets.QWidget()
-            gl = QtWidgets.QGridLayout(w)
-            gl.setContentsMargins(*MARG)
-            gl.setHorizontalSpacing(HSP)
+                item = QtWidgets.QListWidgetItem()
+                item.setData(QtCore.Qt.UserRole, diff.id)
 
-            title = QtWidgets.QLabel(f"茬点{global_idx}")
-            title.setStyleSheet(f"color:{color.name()}; font-size:12px; font-weight:600;")
+                w = QtWidgets.QWidget()
+                gl = QtWidgets.QGridLayout(w)
+                gl.setContentsMargins(*MARG)
+                gl.setHorizontalSpacing(HSP)
 
-            edit = QtWidgets.QLineEdit()
-            edit.setText(diff.label)
-            edit.textChanged.connect(lambda text, _id=diff.id: self.on_label_changed(_id, text))
+                title = QtWidgets.QLabel(f"茬点{global_idx}")
+                title.setStyleSheet(f"color:{color.name()}; font-size:12px; font-weight:600;")
 
-            enabled = QtWidgets.QCheckBox()
-            enabled.setChecked(diff.enabled)
-            enabled.stateChanged.connect(lambda _state, _id=diff.id: self.on_enabled_toggled(_id))
+                edit = QtWidgets.QLineEdit()
+                edit.setText(diff.label)
+                edit.textChanged.connect(lambda text, _id=diff.id: self.on_label_changed(_id, text))
 
-            visibled = QtWidgets.QCheckBox()
-            visibled.setChecked(diff.visible)
-            visibled.stateChanged.connect(lambda _state, _id=diff.id: self.on_visibled_toggled(_id))
+                enabled = QtWidgets.QCheckBox()
+                enabled.setChecked(diff.enabled)
+                enabled.stateChanged.connect(lambda _state, _id=diff.id: self.on_enabled_toggled(_id))
 
-            radius_label = QtWidgets.QLabel()
-            radius_label.setObjectName(f"radius_{diff.id}")
-            radius_label.setStyleSheet("color:#666;font-size:11px;")
-            if not hasattr(self, 'radius_labels'):
-                self.radius_labels = {}
-            self.radius_labels[diff.id] = radius_label
-            self._update_radius_value_for_label(diff)
+                visibled = QtWidgets.QCheckBox()
+                visibled.setChecked(diff.visible)
+                visibled.stateChanged.connect(lambda _state, _id=diff.id: self.on_visibled_toggled(_id))
 
-            btn_delete = QtWidgets.QToolButton()
-            btn_delete.setToolTip("删除该茬点")
-            btn_delete.setAutoRaise(True)
-            btn_delete.setFixedSize(24, 24)
-            try:
-                btn_delete.setText("X")
-                btn_delete.setIconSize(QtCore.QSize(14, 14))
-            except Exception:
-                btn_delete.setText("X")
-            btn_delete.setStyleSheet(
-                "QToolButton{border:none;background:transparent;}"
-                "QToolButton:hover{background:rgba(220,53,69,0.12);border-radius:4px;}"
-            )
-            btn_delete.clicked.connect(lambda _=False, _id=diff.id: self.delete_diff_by_id(_id))
+                radius_label = QtWidgets.QLabel()
+                radius_label.setObjectName(f"radius_{diff.id}")
+                radius_label.setStyleSheet("color:#666;font-size:11px;")
+                if not hasattr(self, 'radius_labels'):
+                    self.radius_labels = {}
+                self.radius_labels[diff.id] = radius_label
+                radius = RADIUS_LEVELS[diff.hint_level]
+                self._update_radius_value_for_label(diff.id, radius)
 
-            # ---- 尺寸策略：固定列固定宽，输入框可扩展 ----
-            for wid in (visibled, enabled, btn_delete, title, radius_label):
-                wid.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Fixed)
-            edit.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
+                btn_delete = QtWidgets.QToolButton()
+                btn_delete.setToolTip("删除该茬点")
+                btn_delete.setAutoRaise(True)
+                btn_delete.setFixedSize(24, 24)
+                try:
+                    btn_delete.setText("X")
+                    btn_delete.setIconSize(QtCore.QSize(14, 14))
+                except Exception:
+                    btn_delete.setText("X")
+                btn_delete.setStyleSheet(
+                    "QToolButton{border:none;background:transparent;}"
+                    "QToolButton:hover{background:rgba(220,53,69,0.12);border-radius:4px;}"
+                )
+                btn_delete.clicked.connect(lambda _=False, _id=diff.id: self.delete_diff_by_id(_id))
 
-            # 固定列像素宽
-            visibled.setFixedWidth(COL_FIXED[0])
-            title.setFixedWidth(COL_FIXED[1])
-            radius_label.setFixedWidth(COL_FIXED[3])
-            enabled.setFixedWidth(COL_FIXED[4])
-            btn_delete.setFixedWidth(COL_FIXED[5])
+                # ---- 尺寸策略 ----
+                for wid in (visibled, enabled, btn_delete, title, radius_label):
+                    wid.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Fixed)
+                edit.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
 
-            # Grid 列最小宽/伸展：小列不伸展，编辑列伸展
-            for col, wpx in COL_FIXED.items():
-                gl.setColumnMinimumWidth(col, wpx)
-                gl.setColumnStretch(col, 0)
-            gl.setColumnMinimumWidth(2, EDIT_MIN)       # 输入框最小宽
-            gl.setColumnStretch(2, 1)                   # ✅ 输入框列吃剩余
+                visibled.setFixedWidth(COL_FIXED[0])
+                title.setFixedWidth(COL_FIXED[1])
+                radius_label.setFixedWidth(COL_FIXED[3])
+                enabled.setFixedWidth(COL_FIXED[4])
+                btn_delete.setFixedWidth(COL_FIXED[5])
 
-            # ---- 布局 ----
-            gl.addWidget(visibled,     0, 0)
-            gl.addWidget(title,        0, 1)
-            gl.addWidget(edit,         0, 2)
-            gl.addWidget(radius_label, 0, 3)
-            gl.addWidget(enabled,      0, 4)
-            gl.addWidget(btn_delete,   0, 5)
-            # 删掉你原来的 gl.setColumnStretch(1, 1)
+                for col, wpx in COL_FIXED.items():
+                    gl.setColumnMinimumWidth(col, wpx)
+                    gl.setColumnStretch(col, 0)
+                gl.setColumnMinimumWidth(2, EDIT_MIN)
+                gl.setColumnStretch(2, 1)
 
-            # 统一每行的最小总宽，保证两组列表行宽一致
-            ncols = 6
-            row_min_w = sum(COL_FIXED.values()) + EDIT_MIN + HSP*(ncols-1) + MARG[0] + MARG[2]
-            w.setMinimumWidth(row_min_w)
-            w.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
+                gl.addWidget(visibled,     0, 0)
+                gl.addWidget(title,        0, 1)
+                gl.addWidget(edit,         0, 2)
+                gl.addWidget(radius_label, 0, 3)
+                gl.addWidget(enabled,      0, 4)
+                gl.addWidget(btn_delete,   0, 5)
 
-            w.setLayout(gl)
-            item.setSizeHint(w.sizeHint())
-            lw.addItem(item)
-            lw.setItemWidget(item, w)
-            global_idx += 1
+                ncols = 6
+                row_min_w = sum(COL_FIXED.values()) + EDIT_MIN + HSP*(ncols-1) + MARG[0] + MARG[2]
+                w.setMinimumWidth(row_min_w)
+                w.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
 
-        self.update_total_count()
+                w.setLayout(gl)
+                item.setSizeHint(w.sizeHint())
+                lw.addItem(item)
+                lw.setItemWidget(item, w)
+                global_idx += 1
 
-        # 维持当前选中高亮
-        if hasattr(self, '_selected_diff_id') and self._selected_diff_id:
+            self.update_total_count()
+
+            # 重建后默认不选中任何行（避免触发回调后的选中联动）
+            up.clearSelection();   up.setCurrentRow(-1)
+            down.clearSelection(); down.setCurrentRow(-1)
+
+        finally:
+            self._rebuilding = False
+            # QSignalBlocker 离开作用域自动恢复信号
+
+        # 如需恢复到之前的选中，放在解除屏蔽之后执行（可选）
+        if self._selected_diff_id is not None:
             self._set_selected_diff(self._selected_diff_id)
 
 
-    def on_label_changed(self, diff_id: str, text: str) -> None:
-        diff = next((d for d in self.differences if d.id == diff_id), None)
-        if not diff:
-            return
-        diff.label = text
-        u = self.rect_items_up.get(diff.id)
-        d = self.rect_items_down.get(diff.id)
-        self._make_dirty()
-        if u:
-            u.update_label()
-        if d:
-            d.update_label()
-
-
-    def _make_dirty(self) -> None:
-        self._is_dirty = True
-        self._update_window_title()
-        self._update_status_bar('unsaved')
-
-    def _update_radius_value_for_label(self, diff: Difference) -> None:
-        label = getattr(self, 'radius_labels', {}).get(diff.id)
+    def _update_radius_value_for_label(self, diffid: str, r: float) -> None:
+        label = getattr(self, 'radius_labels', {}).get(diffid)
         if not label:
             return
-        # show actual radius px (use 'up' fields for展示)
-        size_min = max(1.0, min(diff.width, diff.height))
-        half = size_min / 2.0
-        lvl = diff.hint_level
-        if 1 <= lvl <= len(RADIUS_LEVELS):
-            radius_px = min(float(RADIUS_LEVELS[lvl - 1]), half)
-        else:
-            radius_px = half
-        label.setText(f"半径: {int(round(radius_px))}")
-
-    def on_enabled_toggled(self, diff_id: str) -> None:
-        diff = next((d for d in self.differences if d.id == diff_id), None)
-        if not diff:
-            return
-        diff.enabled = not diff.enabled
-        self._make_dirty()
-        self.update_total_count()
-
-    def on_visibled_toggled(self, diff_id: str) -> None:
-        diff = next((d for d in self.differences if d.id == diff_id), None)
-        if not diff:
-            return
-        diff.visible = not diff.visible
-        self._apply_enabled_style(diff)
-        self._sync_item_visibility(diff)
+        val = int(math.floor(r + 0.5))   # 避免 round() 的银行家舍入
+        label.setText(f"半径:{val}")
 
     def on_list_selection_changed(self) -> None:
+        if getattr(self, '_rebuilding', False) or self._syncing_selection:
+            return
         # reflect list selection to scene items (both up/down)
         if self._syncing_selection:
             return
@@ -1611,56 +567,38 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
         diff_id = item.data(QtCore.Qt.UserRole) if item else None
         self._set_selected_diff(diff_id)
 
-    def _set_selected_diff(self, diff_id: Optional[str]) -> None:
-        self._selected_diff_id = diff_id
-        # 同步另一个列表的当前行
-        self._syncing_selection = True
-        try:
-            for section in ('up', 'down'):
-                lw = self.current_list(section)
-                found = False
-                for i in range(lw.count()):
-                    it = lw.item(i)
-                    if diff_id is not None and it and it.data(QtCore.Qt.UserRole) == diff_id:
-                        lw.setCurrentRow(i)
-                        found = True
-                        break
-                if not found and diff_id is None:
-                    lw.clearSelection()
-        finally:
-            self._syncing_selection = False
-        # 应用透明度高亮
-        self._apply_selected_opacity()
-
-    def _apply_selected_opacity(self) -> None:
-        # 使用填充颜色突出选中项：选中为蓝色填充，其余为红色填充；透明度固定
-        selected_id = getattr(self, '_selected_diff_id', None)
-        for mapping in (self.rect_items_up, self.rect_items_down):
-            for did, item in mapping.items():
-                try:
-                    # 隐藏时不修改以免意外显现
-                    if item.pen().style() == QtCore.Qt.NoPen:
-                        continue
-                    fill = QtGui.QColor('#0d6efd') if (selected_id is not None and did == selected_id) else QtGui.QColor('#ff0000')
-                    fill.setAlpha(40)
-                    item.setBrush(QtGui.QBrush(fill))
-                    # 保持描边为红色
-                    pen = item.pen()
-                    if pen.style() != QtCore.Qt.NoPen:
-                        pen.setColor(QtGui.QColor('#ff0000'))
-                        pen.setWidth(2)
-                        item.setPen(pen)
-                except Exception:
-                    pass
-
-    def delete_selected(self, section: str) -> None:
-        lw = self.current_list(section)
-        it = lw.currentItem()
-        if not it:
-            QtWidgets.QMessageBox.information(self, "提示", "请先在列表选择一个不同点")
+    def on_visibled_toggled(self, diff_id: str) -> None:
+        diff = next((d for d in self.differences if d.id == diff_id), None)
+        if not diff:
             return
-        diff_id = it.data(QtCore.Qt.UserRole)
-        self.delete_diff_by_id(diff_id)
+        diff.visible = not diff.visible
+        u = self.rect_items_up.get(diff.id)
+        d = self.rect_items_down.get(diff.id)
+        if u:
+            u.setVisible(diff.visible)
+        elif d:
+            d.setVisible(diff.visible)
+
+    def on_label_changed(self, diff_id: str, text: str) -> None:
+        diff = next((d for d in self.differences if d.id == diff_id), None)
+        if not diff:
+            return
+        diff.label = text
+        u = self.rect_items_up.get(diff.id)
+        d = self.rect_items_down.get(diff.id)
+        self._make_dirty()
+        if u:
+            u.updateLabel()
+        elif d:
+            d.updateLabel()
+
+    def on_enabled_toggled(self, diff_id: str) -> None:
+        diff = next((d for d in self.differences if d.id == diff_id), None)
+        if not diff:
+            return
+        diff.enabled = not diff.enabled
+        self._make_dirty()
+        self.update_total_count()
 
     def delete_diff_by_id(self, diff_id: str) -> None:
         idx = next((i for i, d in enumerate(self.differences) if d.id == diff_id), -1)
@@ -1708,45 +646,97 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
             pass
 
         # 2) 立即持久化当前配置与元信息（不做校验，避免未填写文本阻塞）
-        try:
-            self._write_config_snapshot()
-        except Exception:
-            pass
-        try:
-            # 状态置为未保存，写入 meta（包含 needAI 重排）
-            self._write_meta_status('unsaved', persist=True)
-        except Exception:
-            pass
+        self._write_config_snapshot()
 
         # 3) reindex titles by rebuilding lists
         self.rebuild_lists()
         self._make_dirty()
-        if getattr(self, '_selected_diff_id', None) == diff_id:
-            self._set_selected_diff(None)
+        if self._selected_diff_id == diff_id:
+            self._set_selected_diff("")
+
+    def _set_selected_diff(self, diff_id: Optional[str]) -> None:
+        """按照 diff.section 只在对应区域选中，并同步对应场景的高亮。
+        diff_id 为 None 时清空两侧列表与场景高亮。
+        """
+        prev_id = self._selected_diff_id
+        if prev_id == diff_id:
+            return
+
+        # 1) 取消旧选中态（两侧都清一次，安全）
+        if prev_id is not None:
+            for mapping in (self.rect_items_up, self.rect_items_down):
+                it = mapping.get(prev_id)
+                if it:
+                    it.setExternalSelected(False, raise_z=False)
+
+        # 2) 记录新选中
+        self._selected_diff_id = diff_id
+
+        # diff_id 为 None：清空两侧列表选中并返回
+        if diff_id is None:
+            self._syncing_selection = True
+            try:
+                for section in ("up", "down"):
+                    lw = self.current_list(section)
+                    if lw:
+                        lw.clearSelection()
+                        lw.setCurrentRow(-1)
+            finally:
+                self._syncing_selection = False
+            return
+
+        # 3) 查找 diff，拿到它的 section
+        target_diff = next((d for d in self.differences if d.id == diff_id), None)
+        target_section = target_diff.section if target_diff else None
+
+        # 4) 同步左右两侧列表的选中行：只在目标 section 选中，另一侧清空
+        self._syncing_selection = True
+        try:
+            for section in ("up", "down"):
+                lw = self.current_list(section)
+                if lw is None:
+                    continue
+
+                if section != target_section:
+                    lw.clearSelection()
+                    lw.setCurrentRow(-1)
+                    continue
+
+                # 在目标侧定位并选中对应行
+                row = -1
+                for i in range(lw.count()):
+                    it = lw.item(i)
+                    if it and it.data(QtCore.Qt.UserRole) == diff_id:
+                        row = i
+                        break
+                lw.setCurrentRow(row)
+        finally:
+            self._syncing_selection = False
+
+        # 5) 设置场景图元高亮：只在目标侧设置，另一侧保持未选
+        if target_diff:
+            mapping = self.rect_items_up if target_section == "up" else self.rect_items_down
+            it = mapping.get(diff_id)
+            if it:
+                it.setExternalSelected(True, raise_z=True)
+
 
     def refresh_visibility(self) -> None:
-        for diff in self.differences:
-            self._sync_item_visibility(diff)
+        show_regions = self.toggle_regions.isChecked()
+        show_hints = self.toggle_hints.isChecked()
+        show_labels = self.toggle_labels.isChecked()
+        for d in (self.rect_items_up, self.rect_items_down):
+            for item in d.values():
+                item.setVis(show_regions, show_hints, show_labels)
 
     # === AI 预览覆盖 ===
     def on_toggle_ai_preview(self) -> None:
         if self.toggle_ai_preview.isChecked():
-            self._enable_ai_overlays()
+            self.ai_overlays_up.setVisible(True)
+            self.ai_overlays_down.setVisible(True)
         else:
-            self._remove_ai_overlays()
-
-    def ai_result_path(self, index: int) -> str:
-        file_name = os.path.splitext(os.path.basename(self.pair.up_image_path))[0]
-        return os.path.join(self.level_dir(), f"{file_name}_region{index}.png")
-    
-    def _enable_ai_overlays(self) -> None:
-        self.ai_overlays_up.setVisible(True)
-        self.ai_overlays_down.setVisible(True)
-
-    def _remove_ai_overlays(self) -> None:
-        # remove from scenes and clear
-        self.ai_overlays_up.setVisible(False)
-        self.ai_overlays_down.setVisible(False)
+            self.ai_overlays_up.setVisible(False)
+            self.ai_overlays_down.setVisible(False)
 
     def _refresh_ai_overlays(self) -> None:
         # rebuild overlays from disk according to current differences order
@@ -1772,27 +762,15 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
         self.ai_overlays_up.setPixmap(pixup)
         self.ai_overlays_down.setPixmap(pixdown)
 
-    def update_total_count(self) -> None:
-        count = sum(1 for d in self.differences if d.enabled)
-        self.total_count.setText(f"茬点总计：{len(self.differences)}, 已勾选AI处理:{count}项")
-        # 没有茬点时，不允许进行AI处理
-        try:
-            self.btn_submit.setEnabled(count > 0)
-        except Exception:
-            pass
-
     # removed spin count UI
 
-    # === Save/Load ===
     def level_dir(self) -> str:
         # directory for this level
-        return os.path.join(self.config_dir, f"{self.pair.name}")
+        return os.path.join(self.config_dir, f"{self.name}")
 
     def config_json_path(self) -> str:
         return os.path.join(self.level_dir(), "config.json")
 
-    def meta_json_path(self) -> str:
-        return os.path.join(self.level_dir(), "meta.json")
 
     def validate_before_save(self) -> Tuple[bool, Optional[str]]:
         # 1) labels required (all points)
@@ -1854,14 +832,13 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
         if not ok:
             QtWidgets.QMessageBox.warning(self, "校验失败", msg or "校验失败")
             return
-        self._write_meta_status('saved', persist=True)
         self.save_config()
         self._is_dirty = False
         self._update_window_title()
 
     def on_ai_process(self) -> None:
         # 保存前置：未保存则禁止处理
-        if getattr(self, '_is_dirty', False) or self.meta_status == 'unsaved':
+        if getattr(self, '_is_dirty', False) or self.status == 'unsaved':
             QtWidgets.QMessageBox.information(self, "提示", "当前修改尚未保存，请先保存后再进行AI处理。")
             return
         # Step 1: alidation
@@ -1876,7 +853,6 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
             )
             return
 
-        # Step 2: 从 meta.json 中读取待处理索引（若存在），否则根据 needAI 计算
         targets: List[int] = []
         for idx, d in enumerate(self.differences, start=1):
             if d.enabled:
@@ -1884,30 +860,19 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
         if not targets:
             QtWidgets.QMessageBox.information(self, "AI处理", "未勾选茬点，请勾选要处理的茬点")
             return
-        try:
-            self._write_meta_status('aiPending', persist=True)
-        except Exception:
-            pass
+        self._update_status("aiPending")
         # Step 3: 在后台线程执行AI，并显示非阻塞进度对话框
         # 准备 origin 路径
         level_dir = self.level_dir()
-        origin = None
-        for ext in ['.png', '.jpg', '.jpeg']:
-            p = os.path.join(level_dir, f'origin{ext}')
-            if os.path.isfile(p):
-                origin = p
-                break
-        if origin is None:
-            origin = self.pair.up_image_path
+
+        origin = self.pair.image_path
 
         # 状态栏进度
         self._ai_progress_start(len(targets))
 
-        file_name = os.path.splitext(os.path.basename(self.pair.up_image_path))[0]
-
         # 后台线程
         self._ai_thread = QtCore.QThread(self)
-        self._ai_worker = AIWorker(level_dir, origin, file_name, self.differences, targets)
+        self._ai_worker = AIWorker(level_dir, self.name, self.ext, self.differences, targets)
         self._ai_worker.moveToThread(self._ai_thread)
         self._ai_thread.started.connect(self._ai_worker.run)
         # Ensure slots execute on GUI thread
@@ -1917,35 +882,15 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
         self._ai_thread.finished.connect(self._ai_thread.deleteLater)
         self._ai_thread.start()
 
-    def _write_meta_status(self, status: str, persist: bool = False) -> None:
-        self.meta_status = status
-        # merge or write meta.json
-        meta_path = self.meta_json_path()
-        # build needAI array by current differences order
-        meta = {
-            "imageName": os.path.basename(self.pair.up_image_path),
-            "imageSize": [int(self.up_scene.width()), int(self.up_scene.height())],
-            "status": status,
-        }
-        
-        # 仅在持久化请求或未启用延迟时写盘
-        if persist or not getattr(self, '_defer_disk_writes', False):
-            os.makedirs(self.level_dir(), exist_ok=True)
-            try:
-                with open(meta_path, 'w', encoding='utf-8') as f:
-                    json.dump(meta, f, ensure_ascii=False, indent=2)
-            except Exception:
-                pass
-        self._update_status_bar(status)
+    def save_config(self) -> None:
 
-    def save_config(self, show_message: bool = True) -> None:
+        self._update_status('saved')
         self._write_config_snapshot()
-
-        file_name = os.path.splitext(os.path.basename(self.pair.up_image_path))[0]
-        file_ext = os.path.splitext(os.path.basename(self.pair.up_image_path))[1]
+        file_name = self.name
+        file_ext = self.ext
         # copy original image into level dir and rename as origin.{ext}
         try:
-            src_img = self.pair.up_image_path
+            src_img = self.pair.image_path
             if os.path.isfile(src_img):
                 _, ext = os.path.splitext(src_img)
                 if not ext:
@@ -1958,7 +903,6 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
 
         QtWidgets.QMessageBox.information(self, "成功", f"配置保存成功\n")
 
-        self._update_status_bar()
 
     def _write_config_snapshot(self) -> None:
         """Write current differences to config.json without validation or UI side-effects.
@@ -1974,12 +918,13 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
         def to_percent_x(x_px: float) -> float:
             return x_px / w
 
-        file_name = os.path.splitext(os.path.basename(self.pair.up_image_path))[0]
-        file_ext = os.path.splitext(os.path.basename(self.pair.up_image_path))[1]
+        file_name = self.name
+        file_ext = self.ext
         data = {
             "imageName": f"{file_name}_origin{file_ext}",
             "imageWidth":int(self.up_scene.width()),
             "imageHeight": int(self.up_scene.height()),
+            "status": self.status,
             "differenceCount": len(self.differences),
             "differences": []
         }
@@ -1994,6 +939,8 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
             # local center -> absolute
             cx = to_percent_x(d.x + d.cx)
             cy = to_percent_y_bottom(d.y + d.cy)
+            cx = max(0.0, min(1.0, cx))
+            cy = max(0.0, min(1.0, cy))
 
             lvl = d.hint_level
             # 从 hint level 获取半径（修正list越界问题）
@@ -2055,9 +1002,10 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
             self.update_total_count()
             self.toggle_ai_preview.setEnabled(False)
             self.toggle_ai_preview.setChecked(False)
-            self._remove_ai_overlays()
+            self.ai_overlays_up.setVisible(False)
+            self.ai_overlays_down.setVisible(False)
             self._is_dirty = False
-            self._update_status_bar('unsaved')
+            self._update_status('unsaved')
             self._update_window_title()
             return
         try:
@@ -2078,6 +1026,7 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
             return (1.0 - py) * h
 
         self._clear_all_items()
+        self._update_status(cfg.get('status', "未开始"))
         self.differences.clear()
         for diff in cfg.get('differences', []):
             points = diff.get('points', [])
@@ -2091,6 +1040,8 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
             c_y = float(diff.get('circleCenter', {}).get('y', -1))
             cpx = from_percent_x(c_x)
             cpy = from_percent_y_bottom(c_y)
+            cx_local = cpx - min_x
+            cy_local = cpy - min_y
             d = Difference(
                 id=str(diff.get('id', now_id())),
                 name=str(diff.get('name', f"不同点 {len(self.differences) + 1}")),
@@ -2104,8 +1055,8 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
                 width=max(MIN_RECT_SIZE, max_x - min_x),
                 height=max(MIN_RECT_SIZE, max_y - min_y),
                 hint_level = int(diff.get('hintLevel', 0)),
-                cx=cpx,
-                cy=cpy,
+                cx=cx_local,
+                cy=cy_local,
             )
             self.differences.append(d)
             self._add_rect_items(d)
@@ -2117,113 +1068,9 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
         if self.toggle_ai_preview.isChecked():
             self._refresh_ai_overlays()
 
-        # read meta.json if exists
-        try:
-            with open(os.path.join(dir_path, 'meta.json'), 'r', encoding='utf-8') as f:
-                meta = json.load(f)
-                self.meta_status = meta.get('status', 'unsaved')
-                
-                self._update_status_bar(self.meta_status)
-        except Exception:
-            self.meta_status = 'unsaved'
-            self._update_status_bar(self.meta_status)
-
-    # selection changed slots
-    def _on_up_selection_changed(self) -> None:
-        self.on_scene_selection_changed('up')
-
-    def _on_down_selection_changed(self) -> None:
-        self.on_scene_selection_changed('down')
-
-    def on_scene_selection_changed(self, section: str) -> None:
-        if self._syncing_selection or self._suppress_scene_selection:
-            return
-        mapping = self.rect_items_up if section == 'up' else self.rect_items_down
-        selected_id: Optional[str] = None
-        for diff_id, item in list(mapping.items()):
-            try:
-                # skip deleted Qt objects
-                if shiboken6 is not None and not shiboken6.isValid(item):
-                    mapping.pop(diff_id, None)
-                    continue
-                if item.isSelected():
-                    selected_id = diff_id
-                    break
-            except RuntimeError:
-                # underlying C++ object is gone
-                mapping.pop(diff_id, None)
-                continue
-        if selected_id:
-            self._select_diff_items(selected_id)
-
-    def _on_item_context_menu(self, event: QtWidgets.QGraphicsSceneContextMenuEvent, diff_id: str) -> None:
-        menu = QtWidgets.QMenu()
-        act_delete = menu.addAction("删除该茬点")
-        action = menu.exec_(event.screenPos())
-        if action == act_delete:
-            self.delete_diff_by_id(diff_id)
-
-    def keyPressEvent(self, event: QtGui.QKeyEvent) -> None:
-        if event.key() in (QtCore.Qt.Key_Delete, QtCore.Qt.Key_Backspace):
-            # try delete selected rect if any
-            for items in (self.rect_items_up, self.rect_items_down):
-                for rid, item in list(items.items()):
-                    if item.isSelected():
-                        self.delete_diff_by_id(rid)
-                        return
-        super().keyPressEvent(event)
-
-    # removed spin count UI
-
-    def _on_list_hover_leave(self, section: str) -> None:
-        self._apply_list_hover_highlight(-1)
-
-    def _apply_list_hover_highlight(self, hovered_row: int) -> None:
-        # 同步高亮两侧场景的对应矩形
-        ids: List[str] = []
-        for section in ('up', 'down'):
-            lw = self.current_list(section)
-            if hovered_row is None or hovered_row < 0:
-                target_id = None
-            else:
-                it = lw.item(hovered_row)
-                target_id = it.data(QtCore.Qt.UserRole) if it else None
-            ids.append(target_id)
-        # 清除所有临时高亮
-        for mapping in (self.rect_items_up, self.rect_items_down):
-            for it in mapping.values():
-                it.set_temp_highlight(False)
-        # 清除右侧 hover 背景
-        for section in ('up', 'down'):
-            lw = self.current_list(section)
-            for i in range(lw.count()):
-                it = lw.item(i)
-                it.setBackground(QtGui.QBrush(QtCore.Qt.transparent))
-        # 同步高亮目标（hovered_row 对应的 id 在两个列表中相同顺序）
-        if hovered_row is not None and hovered_row >= 0:
-            # 找到一个 id 即可
-            for section in ('up', 'down'):
-                lw = self.current_list(section)
-                it = lw.item(hovered_row)
-                if not it:
-                    continue
-                did = it.data(QtCore.Qt.UserRole)
-                if did:
-                    if did in self.rect_items_up:
-                        self.rect_items_up[did].set_temp_highlight(True)
-                    if did in self.rect_items_down:
-                        self.rect_items_down[did].set_temp_highlight(True)
-                    # 设置右侧列表 hover 背景
-                    it.setBackground(QtGui.QBrush(QtGui.QColor(0, 123, 255, 40)))
-                    break
-
-    def _on_list_item_entered(self, section: str, lw: QtWidgets.QListWidget, item: QtWidgets.QListWidgetItem) -> None:
-        row = lw.row(item)
-        self._apply_list_hover_highlight(row)
-
     def closeEvent(self, event: QtGui.QCloseEvent) -> None:
         # 未保存时提示
-        if getattr(self, '_is_dirty', False) or self.meta_status == 'unsaved':
+        if getattr(self, '_is_dirty', False) or self.status == 'unsaved':
             ret = QtWidgets.QMessageBox.question(
                 self,
                 "未保存",
@@ -2247,190 +1094,5 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
         event.accept()
 
 
-    # --- ADD: 导出三张贴回结果（不缩放） ---
-    def export_composites_no_resize(self,
-                                    out_up: Optional[str] = None,
-                                    out_down: Optional[str] = None) -> Tuple[str, str]:
-        """
-        使用 level_dir 下 AI 产物 region{i}.png（按 differences 顺序）贴回到 origin 大图。
-        小图原尺寸不缩放；以矩形左上角 (d.x, d.y) 为锚点；越界自动裁剪。
-        生成：
-        - origin 拷贝
-        - 仅贴 up 区域的图
-        - 仅贴 down 区域的图
-        """
-        # 1) 找 origin
-        level_dir = self.level_dir()
-        origin_path = None
-        file_name = os.path.splitext(os.path.basename(self.pair.up_image_path))[0]
-        file_ext = os.path.splitext(os.path.basename(self.pair.up_image_path))[1]
-
-        p = os.path.join(level_dir, f'{file_name}_origin{file_ext}')
-        if os.path.isfile(p):
-            origin_path = p
-        if origin_path is None:
-            origin_path = self.pair.up_image_path  # 兜底
-
-        big = _imread_any(origin_path, cv2.IMREAD_UNCHANGED)
-        if big is None:
-            raise RuntimeError(f"无法读取大图：{origin_path}")
-
-        up_img = big.copy()
-        down_img = big.copy()
-
-        H, W = big.shape[:2]
-
-        # 2) 逐差异贴回（使用 region{i}.png）
-        for idx, d in enumerate(self.differences, start=1):
-            region_path = self.ai_result_path(idx)  # {level_dir}/region{idx}.png
-            if not os.path.isfile(region_path):
-                continue
-            small = _imread_any(region_path, cv2.IMREAD_UNCHANGED)  # 可能 BGRA
-            if small is None:
-                continue
-
-            # 左上角锚点（自然像素）
-            l, t, iw, ih = _quantize_roi(d.x, d.y, d.width, d.height, W, H)
-
-            if d.section == 'up':
-                _alpha_paste_no_resize_cv(small, up_img, l, t)
-            elif d.section == 'down':
-                _alpha_paste_no_resize_cv(small, down_img, l, t)
-            else:
-                # 未知 section，忽略
-                pass
-        # 3) 写盘
-        out_up     = out_up     or os.path.join(level_dir, "composite_up.png")
-        out_down   = out_down   or os.path.join(level_dir, "composite_down.png")
-
-        _imwrite_any(out_up, up_img)
-        _imwrite_any(out_down, down_img)
-
-        return  out_up, out_down
-
-    def export_pin_mosaic(self, out_path: Optional[str] = None,
-                      margin: int = 40, gap: int = 24) -> None:
-        """
-        先确保有三张图（origin/up/down），再合成“品”字形拼图。
-        如果还没导出过，则调用 export_composites_no_resize() 生成它们。
-        """
-        level_dir = self.level_dir()
-        out_path = out_path or os.path.join(level_dir, "apreview.png")
-
-        # 先找现成的三张图
-        origin_path = None
-        for ext in ['.png', '.jpg', '.jpeg']:
-            p = os.path.join(level_dir, f'origin{ext}')
-            if os.path.isfile(p):
-                origin_path = p
-                break
-        if origin_path is None:
-            origin_path = self.pair.up_image_path  # 兜底
-
-        up_path = os.path.join(level_dir, "composite_up.png")
-        down_path = os.path.join(level_dir, "composite_down.png")
-
-        # 若 up/down 不存在，就现做一次
-        try:
-            self.export_composites_no_resize(out_up=up_path, out_down=down_path)
-        except Exception:
-            # 如果 export 失败，就直接用 origin 占位，以免中断
-            if not os.path.isfile(up_path):
-                up_path = origin_path
-            if not os.path.isfile(down_path):
-                down_path = origin_path
-
-        # 读图并合成
-        o = _imread_any(origin_path, cv2.IMREAD_COLOR)
-        u = _imread_any(up_path, cv2.IMREAD_COLOR)
-        d = _imread_any(down_path, cv2.IMREAD_COLOR)
-        if o is None or u is None or d is None:
-            raise RuntimeError("读取 origin/up/down 失败，请检查路径。")
-
-        compose_pin_layout(o, u, d, out_path, margin=margin, gap=gap, bg_bgr=(255, 255, 255))
-
-
-class AIWorker(QtCore.QObject):
-    progressed = QtCore.Signal(int, int)  # step, total
-    finished = QtCore.Signal(list)        # failed indices
-    error = QtCore.Signal(str)
-
-    def __init__(self, level_dir: str, origin_path: str, prefex: str, differences: List[Difference], target_indices: List[int]):
-        super().__init__()
-        self.level_dir = level_dir
-        self.origin_path = origin_path
-        self.differences = differences
-        self.target_indices = target_indices
-        self.prepex = prefex
-
-    @QtCore.Slot()
-    def run(self) -> None:
-        try:
-            reader = QtGui.QImageReader(self.origin_path)
-            reader.setAutoTransform(False)  # 与 _imread_any 保持一致
-            img = reader.read()
-            if img.isNull():
-                raise RuntimeError('无法打开 origin 图像')
-
-            total = len(self.target_indices)
-            W, H = img.width(), img.height()
-            step = 0
-            for idx in self.target_indices:
-                d = self.differences[idx - 1]
-                l, t, w, h = _quantize_roi(d.x, d.y, d.width, d.height, W, H)
-                rect = QtCore.QRect(l, t, w, h)
-                subimg = img.copy(rect)  # 裁剪原图
-
-                # 1) 输入图
-                canvas = QtGui.QImage(CANVAS_W, CANVAS_H, QtGui.QImage.Format_ARGB32)
-                canvas.fill(QtGui.QColor(255,255,255,255))             # 外部为纯白不透明
-                ox = (CANVAS_W - w) // 2
-                oy = (CANVAS_H - h) // 2
-                p = QtGui.QPainter(canvas)
-                p.drawImage(ox, oy, subimg)                            # ROI 贴中间
-                p.end()
-
-                buf = QtCore.QBuffer(); buf.open(QtCore.QIODevice.ReadWrite)
-                canvas.save(buf, "PNG"); png_bytes = bytes(buf.data()); buf.close()
-
-                # 2) 掩膜：外部不透明，ROI 清成透明
-                mask = QtGui.QImage(CANVAS_W, CANVAS_H, QtGui.QImage.Format_ARGB32)
-                mask.fill(QtGui.QColor(255,255,255,255))
-                mp = QtGui.QPainter(mask)
-                mp.setCompositionMode(QtGui.QPainter.CompositionMode_Clear)
-                mp.fillRect(QtCore.QRect(ox, oy, w, h), QtCore.Qt.transparent)
-                mp.end()
-
-                bufm = QtCore.QBuffer(); bufm.open(QtCore.QIODevice.ReadWrite)
-                mask.save(bufm, "PNG"); mask_bytes = bytes(bufm.data()); bufm.close()
-
-                # 调试：保存看看
-                # QtGui.QImage.fromData(png_bytes).save(os.path.join(self.level_dir, "dbg_input.png"))
-                # QtGui.QImage.fromData(mask_bytes).save(os.path.join(self.level_dir, "dbg_mask.png"))
-
-                req = ImageEditRequester("input", png_bytes, mask_bytes, d.label)
-                # 获取 AI 返回的图像字节
-                img_bytes = req.send_request()
-                patch = QtGui.QImage.fromData(img_bytes).copy(ox, oy, w, h)
-                # 羽化宽度：短边的 6%（可按需调整/做成参数）
-                feather_px = max(4, int(min(w, h) * 0.06))
-                alpha8 = _make_rect_feather_alpha8(w, h, feather_px)
-
-                # 直通 Alpha：避免预乘导致的整体泛灰
-                patch_feathered = _apply_alpha_straight(patch, alpha8)
-                final_path = os.path.join(self.level_dir, f"{self.prepex}_region{idx}.png")
-                patch_feathered.save(final_path)
-
-                step += 1
-                self.progressed.emit(step, total)
-            # compute failures: region files not present
-            failed = []
-            for idx in self.target_indices:
-                dst = os.path.join(self.level_dir, f"{self.prepex}_region{idx}.png")
-                if not os.path.isfile(dst):
-                    failed.append(idx)
-            self.finished.emit(failed)
-        except Exception as exc:
-            self.error.emit(str(exc))
 
 
