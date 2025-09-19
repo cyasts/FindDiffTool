@@ -1,16 +1,3 @@
-name: Build desktop packages
-
-on:
-  workflow_dispatch:
-  push:
-    branches:
-      - "**"
-    tags:
-      - "v*"
-
-permissions:
-  contents: write
-
 jobs:
   macos:
     name: macOS build (${{ matrix.arch }})
@@ -24,6 +11,7 @@ jobs:
       APP_NAME: "FindDiffEditor"
       ENTRY_FILE: "main.py"
       ICON_FILE: "Icon.icns"
+      PY_VER: "3.11.9"   # 需要的 Python 版本（有 universal2 安装包）
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -31,7 +19,6 @@ jobs:
       - name: Ensure Rosetta for x86_64 (Apple Silicon runners)
         if: matrix.arch == 'x86_64'
         run: |
-          # GitHub 的 macOS 14 运行器是 arm64，构建 x86_64 需要 Rosetta
           if ! /usr/bin/pgrep oahd >/dev/null 2>&1; then
             sudo softwareupdate --install-rosetta --agree-to-license
           fi
@@ -45,14 +32,28 @@ jobs:
             echo "MACOSX_DEPLOYMENT_TARGET=11.0" >> $GITHUB_ENV
           fi
 
-      - name: Setup Python venv for ${{ matrix.arch }}
+      # 🔽 仅在 x86_64 分支安装 python.org 的 universal2 Python
+      - name: Install universal2 Python (x86_64 only)
+        if: matrix.arch == 'x86_64'
+        shell: bash
+        run: |
+          PKG="python-${PY_VER}-macos11.pkg"
+          URL="https://www.python.org/ftp/python/${PY_VER}/${PKG}"
+          curl -LO "$URL"
+          sudo installer -pkg "$PKG" -target /
+          # 记录 universal2 Python 路径（后续都用它）
+          echo "PY_U2=/Library/Frameworks/Python.framework/Versions/${PY_VER%.*}/bin/python3" >> $GITHUB_ENV
+
+      - name: Setup venv (${{ matrix.arch }})
         shell: bash
         run: |
           VENV=".venv-${{ matrix.arch }}"
           if [[ ! -d "$VENV" ]]; then
-            if command -v arch >/dev/null 2>&1; then
-              arch -${{ matrix.arch }} python3 -m venv "$VENV"
+            if [[ "${{ matrix.arch }}" == "x86_64" ]]; then
+              # 用 universal2 Python 在 Rosetta 下创建 x86_64 venv
+              arch -x86_64 "$PY_U2" -m venv "$VENV"
             else
+              # arm64 正常创建
               python3 -m venv "$VENV"
             fi
           fi
@@ -62,29 +63,30 @@ jobs:
         shell: bash
         run: |
           source "$VENV_PATH/bin/activate"
-          python -m pip install --upgrade pip setuptools wheel
-          # 避免源码编译，加快速度
-          export PIP_ONLY_BINARY=":all:"
-          pip install -r requirements.txt
-          pip install "pyinstaller>=6.9,<7" "altgraph>=0.17.4" "macholib>=1.16.3"
+          if [[ "${{ matrix.arch }}" == "x86_64" ]]; then
+            arch -x86_64 python -m pip install --upgrade pip setuptools wheel
+            export PIP_ONLY_BINARY=":all:"
+            arch -x86_64 pip install -r requirements.txt
+            arch -x86_64 pip install "pyinstaller>=6.9,<7" "altgraph>=0.17.4" "macholib>=1.16.3"
+          else
+            python -m pip install --upgrade pip setuptools wheel
+            export PIP_ONLY_BINARY=":all:"
+            pip install -r requirements.txt
+            pip install "pyinstaller>=6.9,<7" "altgraph>=0.17.4" "macholib>=1.16.3"
+          fi
 
       - name: Build app (${{ matrix.arch }})
         shell: bash
         run: |
           source "$VENV_PATH/bin/activate"
-
           NAME="${APP_NAME}-${{ matrix.arch }}"
           ARGS=( --noconfirm --name "$NAME" --windowed )
-          if [[ -f "$ICON_FILE" ]]; then
-            ARGS+=( --icon "$ICON_FILE" )
-          fi
-
-          # 可选：若 PySide6 需要完整收集插件，取消下一行注释
+          if [[ -f "$ICON_FILE" ]]; then ARGS+=( --icon "$ICON_FILE" ); fi
+          # 如需完整收集 PySide6 资源，取消下一行注释
           # ARGS+=( --collect-all PySide6 )
 
-          # 为防止多架构混淆，强制在该架构下运行 pyinstaller（带 arch 前缀）
-          if command -v arch >/dev/null 2>&1; then
-            arch -${{ matrix.arch }} pyinstaller "${ARGS[@]}" "$ENTRY_FILE"
+          if [[ "${{ matrix.arch }}" == "x86_64" ]]; then
+            arch -x86_64 pyinstaller "${ARGS[@]}" "$ENTRY_FILE"
           else
             pyinstaller "${ARGS[@]}" "$ENTRY_FILE"
           fi
@@ -113,85 +115,3 @@ jobs:
           path: |
             dist/${{ env.APP_NAME }}-${{ matrix.arch }}.dmg
             dist/${{ env.APP_NAME }}-${{ matrix.arch }}.app.zip
-
-  windows:
-    name: Windows build
-    runs-on: windows-latest
-    env:
-      PIP_ONLY_BINARY: ":all:"
-      APP_NAME: "FindDiffEditor"
-      ENTRY_FILE: "main.py"
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip setuptools wheel
-          pip install -r requirements.txt
-          pip install "pyinstaller>=6.9,<7"
-
-      - name: Build Windows app
-        shell: pwsh
-        run: |
-          $name = "$env:APP_NAME"
-          $args = @(
-            "--noconfirm",
-            "--name", $name,
-            "--windowed"
-          )
-          if (Test-Path "Icon.ico") { $args += @("--icon","Icon.ico") }
-          # 可选：完整收集 PySide6
-          # $args += @("--collect-all","PySide6")
-          pyinstaller @args $env:ENTRY_FILE
-
-      - name: Zip Windows dist
-        shell: pwsh
-        run: |
-          $distDir = "dist/$env:APP_NAME"
-          if (-not (Test-Path $distDir)) { throw "Dist not found: $distDir" }
-          Compress-Archive -Path "$distDir/*" -DestinationPath "dist/$env:APP_NAME-windows.zip" -Force
-
-      - name: Upload Windows artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: windows
-          path: dist/FindDiffEditor-windows.zip
-
-  release:
-    name: Create GitHub Release
-    runs-on: ubuntu-latest
-    needs: [macos, windows]
-    if: startsWith(github.ref, 'refs/tags/')
-    steps:
-      - name: Download macOS arm64
-        uses: actions/download-artifact@v4
-        with:
-          name: macos-arm64
-          path: artifacts/macos-arm64
-
-      - name: Download macOS x86_64
-        uses: actions/download-artifact@v4
-        with:
-          name: macos-x86_64
-          path: artifacts/macos-x86_64
-
-      - name: Download Windows
-        uses: actions/download-artifact@v4
-        with:
-          name: windows
-          path: artifacts/windows
-
-      - name: Create Release and Upload Assets
-        uses: softprops/action-gh-release@v2
-        with:
-          files: |
-            artifacts/**/*.zip
-            artifacts/**/*.dmg
-          draft: false
-          prerelease: false
