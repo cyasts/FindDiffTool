@@ -38,15 +38,7 @@ $pyiArgs = @(
   "--noconfirm",
   "--clean",
   "--name", $Name,
-  "--windowed",
-  "--collect-all", "PySide6",
-  "--hidden-import", "shiboken6",
-  "--hidden-import", "PySide6.QtCore",
-  "--hidden-import", "PySide6.QtGui",
-  "--hidden-import", "PySide6.QtWidgets",
-  "--hidden-import", "PySide6.QtSvg",
-  "--hidden-import", "PySide6.QtSvgWidgets",
-  "--hidden-import", "PySide6.QtNetwork"
+  "--windowed"
 )
 if (Test-Path $IconPath) {
   $pyiArgs += @("--icon", $IconPath)
