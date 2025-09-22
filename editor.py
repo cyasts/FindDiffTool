@@ -114,18 +114,6 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
         self.status_bar = QtWidgets.QStatusBar(self)
         self.status_bar.setSizeGripEnabled(False)
         self.setStatusBar(self.status_bar)
-        # AI progress widgets on status bar
-        self.ai_spinner = QtWidgets.QLabel()
-        self.ai_spinner.setStyleSheet("color:#666; padding-right:6px;")
-        self.ai_spinner.setVisible(False)
-        self.ai_progress = QtWidgets.QProgressBar()
-        self.ai_progress.setFixedWidth(240)
-        self.ai_progress.setTextVisible(False)
-        self.ai_progress.setVisible(False)
-        self.status_bar.addPermanentWidget(self.ai_spinner)
-        self.status_bar.addPermanentWidget(self.ai_progress)
-        # default: use dialog-style progress (user preferred)
-        self.progress_use_dialog: bool = True
 
         # data
         self.differences: List[Difference] = []
@@ -237,34 +225,20 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
         except Exception:
             pass
         self._ai_timer = QtCore.QTimer(self)
-        if self.progress_use_dialog:
-            # Use a modal-looking progress dialog (non-blocking updates via signals)
-            self._ai_dlg = QtWidgets.QProgressDialog("正在上传AI处理...", None, 0, max(1, int(total)), self)
-            self._ai_dlg.setWindowModality(QtCore.Qt.ApplicationModal)
-            self._ai_dlg.setMinimumDuration(0)
-            self._ai_dlg.setAutoClose(False)
-            self._ai_dlg.setAutoReset(False)
-            self._ai_dlg.setAttribute(QtCore.Qt.WA_DeleteOnClose, True)
-            self._ai_dlg.setValue(0)
-            self._ai_dlg.show()
-            def tick():
-                self._ai_frame_idx += 1
-                self._ai_dlg.setLabelText(f"{frames[self._ai_frame_idx % len(frames)]} 正在上传AI处理... {self._ai_dlg.value()}/{self._ai_dlg.maximum()} ")
-            self._ai_timer.timeout.connect(tick)
-            self._ai_timer.start(120)
-            # hide status bar widgets during dialog mode
-            self.ai_spinner.setVisible(False)
-            self.ai_progress.setVisible(False)
-        else:
-            self.ai_progress.setMaximum(max(1, int(total)))
-            self.ai_progress.setValue(0)
-            self.ai_progress.setVisible(True)
-            self.ai_spinner.setVisible(True)
-            def tick():
-                self._ai_frame_idx += 1
-                self.ai_spinner.setText(frames[self._ai_frame_idx % len(frames)])
-            self._ai_timer.timeout.connect(tick)
-            self._ai_timer.start(120)
+        # Use a modal-looking progress dialog (non-blocking updates via signals)
+        self._ai_dlg = QtWidgets.QProgressDialog("正在上传AI处理...", None, 0, max(1, int(total)), self)
+        self._ai_dlg.setWindowModality(QtCore.Qt.ApplicationModal)
+        self._ai_dlg.setMinimumDuration(0)
+        self._ai_dlg.setAutoClose(False)
+        self._ai_dlg.setAutoReset(False)
+        self._ai_dlg.setAttribute(QtCore.Qt.WA_DeleteOnClose, True)
+        self._ai_dlg.setValue(0)
+        self._ai_dlg.show()
+        def tick():
+            self._ai_frame_idx += 1
+            self._ai_dlg.setLabelText(f"{frames[self._ai_frame_idx % len(frames)]} 正在上传AI处理... {self._ai_dlg.value()}/{self._ai_dlg.maximum()} ")
+        self._ai_timer.timeout.connect(tick)
+        self._ai_timer.start(120)
 
     def _ai_progress_end(self) -> None:
         try:
@@ -274,16 +248,11 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
         except Exception:
             pass
         # close dialog if used
-        if self.progress_use_dialog and getattr(self, '_ai_dlg', None) is not None:
-            try:
-                self._ai_dlg.close()
-            except Exception:
-                pass
-            self._ai_dlg = None
-        # hide status bar widgets
-        self.ai_spinner.clear()
-        self.ai_spinner.setVisible(False)
-        self.ai_progress.setVisible(False)
+        try:
+            self._ai_dlg.close()
+        except Exception:
+            pass
+        self._ai_dlg = None
 
     def _cleanup_ai_thread(self) -> None:
         """Safely stop and delete the worker thread objects from the GUI thread."""
@@ -311,12 +280,8 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
 
     @QtCore.Slot(int, int)
     def _ai_slot_progress(self, step: int, total: int) -> None:
-        if self.progress_use_dialog and getattr(self, '_ai_dlg', None) is not None:
-            self._ai_dlg.setMaximum(max(1, int(total)))
-            self._ai_dlg.setValue(int(step))
-        else:
-            self.ai_progress.setMaximum(max(1, int(total)))
-            self.ai_progress.setValue(int(step))
+        self._ai_dlg.setMaximum(max(1, int(total)))
+        self._ai_dlg.setValue(int(step))
 
     @QtCore.Slot(list)
     def _ai_slot_finished(self, failed: list) -> None:
@@ -576,7 +541,7 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
         d = self.rect_items_down.get(diff.id)
         if u:
             u.setVisible(diff.visible)
-        elif d:
+        if d:
             d.setVisible(diff.visible)
 
     def on_label_changed(self, diff_id: str, text: str) -> None:
@@ -589,7 +554,7 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
         self._make_dirty()
         if u:
             u.updateLabel()
-        elif d:
+        if d:
             d.updateLabel()
 
     def on_enabled_toggled(self, diff_id: str) -> None:

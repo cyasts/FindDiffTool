@@ -574,7 +574,7 @@ class DifferenceItem(QtWidgets.QGraphicsObject):
 
     # ====== 文本字号自适配 ======
     def _compute_fitting_pointsize(self, box_w: float, box_h: float, text: str) -> float:
-        """在给定盒子内，用二分法找最大可用字号（支持换行）。"""
+        """在给定盒子内，用二分法找最大可用字号（支持换行，数字也可断行）。"""
         if box_w <= 1 or box_h <= 1 or not text:
             return 10.0
 
@@ -582,20 +582,26 @@ class DifferenceItem(QtWidgets.QGraphicsObject):
         if self._text_cache_key == key:
             return float(self._text_cached_pt)
 
-        lo, hi = 8.0, max(14.0, box_h * 0.9)  # 最小8pt，最大接近盒高
+        lo, hi = 8.0, max(14.0, box_h * 0.9)
         best = lo
 
         test_font = QtGui.QFont(self._text_font)
-        # 限宽、很高的矩形，交给 Qt 折行并计算高度
         test_rect = QtCore.QRect(0, 0, int(box_w), 10_000)
-        flags = QtCore.Qt.TextWordWrap | QtCore.Qt.AlignCenter
 
-        while hi - lo > 0.5:  # 0.5pt 精度
+        # 关键：允许“任意位置换行”，数字也能断行
+        flags = (QtCore.Qt.AlignCenter
+                | QtCore.Qt.TextWordWrap
+                | QtCore.Qt.TextWrapAnywhere)  # ← 新增
+
+        while hi - lo > 0.5:
             mid = (lo + hi) / 2.0
             test_font.setPointSizeF(mid)
             fm = QtGui.QFontMetrics(test_font)
+
             br = fm.boundingRect(test_rect, flags, text)
-            if br.height() <= box_h:
+
+            # 关键：同时卡“高”和“宽”
+            if br.height() <= box_h and br.width() <= box_w:
                 best = mid
                 lo = mid
             else:
