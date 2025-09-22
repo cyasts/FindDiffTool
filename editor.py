@@ -589,6 +589,12 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
         d = self.differences.pop(idx)
         u = self.rect_items_up.pop(d.id, None)
         dn = self.rect_items_down.pop(d.id, None)
+        if u:
+            self.up_scene.removeItem(u)
+            u.deleteLater()
+        if dn:
+            self.down_scene.removeItem(dn)
+            dn.deleteLater()
 
         # 1) 删除对应 AI 输出图片，并重命名后续序号
         try:
