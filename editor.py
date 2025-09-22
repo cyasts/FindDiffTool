@@ -599,14 +599,14 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
         # 1) 删除对应 AI 输出图片，并重命名后续序号
         try:
             level_dir = self.level_dir()
-            # 删除 region{deleted_index}.png
-            victim = os.path.join(level_dir, f"region{deleted_index}.png")
+            # 删除 {self.name}_region{deleted_index}.png
+            victim = os.path.join(level_dir, f"{self.name}_region{deleted_index}.png")
             if os.path.isfile(victim):
                 os.remove(victim)
-            # 将 region{i}.png -> region{i-1}.png (i 从 deleted_index+1 到 old_count)
+            # 将 {self.name}_region{i}.png -> {self.name}_region{i-1}.png (i 从 deleted_index+1 到 old_count)
             for i in range(deleted_index + 1, old_count + 1):
-                src = os.path.join(level_dir, f"region{i}.png")
-                dst = os.path.join(level_dir, f"region{i-1}.png")
+                src = os.path.join(level_dir, f"{self.name}_region{i}.png")
+                dst = os.path.join(level_dir, f"{self.name}_region{i-1}.png")
                 if os.path.isfile(src):
                     # 若目标已存在（理论上不该发生），先移除目标以避免跨平台报错
                     if os.path.isfile(dst):
