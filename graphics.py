@@ -560,17 +560,23 @@ class DifferenceItem(QtWidgets.QGraphicsObject):
         return super().itemChange(change, value)
 
     def _auto_radius(self, r: QtCore.QRectF) -> float:
-        """从 RADIUS_LEVELS（list）选 <= 内切半径的最大值；太小时退化为 half。"""
+        """
+        在 RADIUS_LEVELS 中选出能放进当前矩形内切圆的最大半径。
+        hint_level = 对应半径的索引(1-based)。
+        若矩形太小，退回到第1档。
+        """
         size = min(r.width(), r.height())
-        half = size * 0.5
-        allowed = [v for v in RADIUS_LEVELS if v <= half - 10]
-        if allowed:
-            radius = float(allowed[-1])
-            self._hint_level = len(allowed)          # 1-based
-        else:
-            radius = float(RADIUS_LEVELS[0])
-            self._hint_level = 1
-        return radius
+        inner_limit = max(0.0, size * 0.5)  # 预留10px安全边
+
+        chosen_level = 1  # 默认第1档
+        for idx, rad in enumerate(RADIUS_LEVELS, start=1):
+            if rad <= inner_limit:
+                chosen_level = idx
+            else:
+                break
+
+        self._hint_level = chosen_level
+        return float(RADIUS_LEVELS[chosen_level - 1])
 
     # ====== 文本字号自适配 ======
     def _compute_fitting_pointsize(self, box_w: float, box_h: float, text: str) -> float:

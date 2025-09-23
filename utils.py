@@ -78,7 +78,6 @@ def _render_circle_over_image(up_img: QImage, down_img: QImage, differences:List
         cx = diff.cx + diff.x
         cy = diff.cy + diff.y
         lvl = diff.hint_level
-        sec = diff.section
         cpath = f":/img/c{lvl}.png"
         circle = _qimage_from_path(cpath)
         circle = _to_premultiplied(circle)

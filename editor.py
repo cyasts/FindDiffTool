@@ -1,5 +1,5 @@
 import os, json, math
-import shutil, time
+import shutil, time, uuid
 from typing import Dict, List, Optional, Tuple
 from PySide6 import QtCore, QtGui, QtWidgets
 
@@ -10,7 +10,42 @@ from graphics import DifferenceItem
 from ai import AIWorker
 
 def now_id() -> str:
-    return str(int(time.time() * 1000))
+    return uuid.uuid4().hex
+
+def clamp_level(level: int) -> int:
+    """把 level 夹到 1..len(RADIUS_LEVELS)。"""
+    n = len(RADIUS_LEVELS)
+    try:
+        lvl = int(level)
+    except Exception:
+        lvl = 1
+    return 1 if lvl < 1 else (n if lvl > n else lvl)
+
+def clamp_level_for_rect(level: int, w: float, h: float) -> int:
+    """
+    在 clamp_level 的基础上，再根据当前矩形大小把 level 降级到“能放得下”的最大档。
+    """
+    lvl = clamp_level(level)
+    inner_limit = max(0.0, min(w, h) * 0.5)
+    while lvl > 1 and RADIUS_LEVELS[lvl - 1] > inner_limit:
+        lvl -= 1
+    return lvl
+
+def clamp_circle_center_local(cx_local: float, cy_local: float, w: float, h: float, level: int) -> Tuple[float, float]:
+    """把局部圆心夹到 [radius, w-radius] / [radius, h-radius]。"""
+    lvl = clamp_level(level)
+    radius = float(RADIUS_LEVELS[lvl - 1])
+    cx = max(radius, min(cx_local, max(radius, w - radius)))
+    cy = max(radius, min(cy_local, max(radius, h - radius)))
+    return cx, cy
+
+def clamp_circle_center_local(cx_local: float, cy_local: float, w: float, h: float, level: int) -> Tuple[float, float]:
+    """把局部圆心夹到 [radius, w-radius] / [radius, h-radius]。"""
+    lvl = clamp_level(level)
+    radius = float(RADIUS_LEVELS[lvl - 1])
+    cx = max(radius, min(cx_local, max(radius, w - radius)))
+    cy = max(radius, min(cy_local, max(radius, h - radius)))
+    return cx, cy
 
 class DifferenceEditorWindow(QtWidgets.QMainWindow):
     def _set_completed_ui_disabled(self, disabled: bool):
@@ -368,7 +403,8 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
             width=rect.width(),
             height=rect.height(),
             cx = rect.width() / 2,
-            cy = rect.height() / 2
+            cy = rect.height() / 2,
+            hint_level=1,
         )
         self.differences.append(diff)
         self._add_rect_items(diff)
@@ -444,7 +480,8 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
                 if not hasattr(self, 'radius_labels'):
                     self.radius_labels = {}
                 self.radius_labels[diff.id] = radius_label
-                radius = RADIUS_LEVELS[diff.hint_level]
+                safe_level = clamp_level(diff.hint_level)
+                radius = RADIUS_LEVELS[safe_level - 1]
                 self._update_radius_value_for_label(diff.id, radius)
 
                 btn_delete = QtWidgets.QToolButton()
@@ -756,11 +793,8 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
             r_w, r_h = d.width, d.height
             cx_local = d.cx if d.cx >= 0 else r_w / 2.0
             cy_local = d.cy if d.cy >= 0 else r_h / 2.0
-            lvl = d.hint_level
-            if 1 <= lvl <= len(RADIUS_LEVELS):
-                radius_px = float(RADIUS_LEVELS[lvl - 1])
-            else:
-                radius_px = min(r_w, r_h) / 2.0
+            lvl = clamp_level_for_rect(d.hint_level, r_w, r_h)
+            radius_px = float(RADIUS_LEVELS[lvl - 1])
             # absolute center in natural coordinates
             cx_abs = d.x + cx_local
             cy_abs = d.y + cy_local
@@ -1013,6 +1047,13 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
             cpy = from_percent_y_bottom(c_y)
             cx_local = cpx - min_x
             cy_local = cpy - min_y
+            
+            w_rect = max(MIN_RECT_SIZE, max_x - min_x)
+            h_rect = max(MIN_RECT_SIZE, max_y - min_y)
+            raw_level = diff.get('hintLevel', 1)
+            lvl = clamp_level_for_rect(raw_level, w_rect, h_rect)
+            cx_local, cy_local = clamp_circle_center_local(cx_local, cy_local, w_rect, h_rect, lvl)
+
             d = Difference(
                 id=str(diff.get('id', now_id())),
                 name=str(diff.get('name', f"不同点 {len(self.differences) + 1}")),
@@ -1025,9 +1066,9 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
                 y=min_y,
                 width=max(MIN_RECT_SIZE, max_x - min_x),
                 height=max(MIN_RECT_SIZE, max_y - min_y),
-                hint_level = int(diff.get('hintLevel', 0)),
-                cx=cx_local,
-                cy=cy_local,
+                hint_level=int(lvl),
+                cx=float(cx_local),
+                cy=float(cy_local),
             )
             self.differences.append(d)
             self._add_rect_items(d)

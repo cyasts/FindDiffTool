@@ -32,6 +32,6 @@ class Difference:
     width: float
     height: float
     # independent hint circles for up/down
-    hint_level: int = 0
+    hint_level: int = 1
     cx: float = -1.0
     cy: float = -1.0
