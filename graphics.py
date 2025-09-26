@@ -183,6 +183,11 @@ class DifferenceItem(QtWidgets.QGraphicsObject):
         self._press_center   = QtCore.QPointF()  # 圆心按下快照（局部）
         self._is_resizing    = False
 
+        # 可见性（内部控制，默认全开）
+        self._show_rect = True
+        self._show_circle = True
+        self._show_label = True
+
         # 仅缓存“上一帧尺寸”
         self._cached_rect_size = QtCore.QSizeF(
             max(MIN_RECT_SIZE, float(self.model.width)),
@@ -238,30 +243,32 @@ class DifferenceItem(QtWidgets.QGraphicsObject):
         c, r = self._current_circle_local()
 
         # 矩形
-        if self._hl_rect:
-            pen = self.PEN_RECT_HL; base_brush = self.BRUSH_RECT_HL
-        else:
-            pen = self.PEN_RECT;    base_brush = self.BRUSH_RECT
-        p.setPen(pen)
-        col = QtGui.QColor(base_brush.color())
-        if self._extern_selected:
-            col.setAlpha(min(255, self._selected_alpha))
-        p.setBrush(QtGui.QBrush(col))
-        p.drawRect(rect)
+        if self._show_rect:
+            if self._hl_rect:
+                pen = self.PEN_RECT_HL; base_brush = self.BRUSH_RECT_HL
+            else:
+                pen = self.PEN_RECT;    base_brush = self.BRUSH_RECT
+            p.setPen(pen)
+            col = QtGui.QColor(base_brush.color())
+            if self._extern_selected:
+                col.setAlpha(min(255, self._selected_alpha))
+            p.setBrush(QtGui.QBrush(col))
+            p.drawRect(rect)
 
         # 本侧显示（沿用 up/down 逻辑）
         visible_for_side = (self.model.section == 'up') == self.is_up
 
         # 圆
-        if self._hl_circle:
-            p.setPen(self.PEN_CIRCLE_HL); p.setBrush(self.BRUSH_CIRC_HL)
-        else:
-            p.setPen(self.PEN_CIRCLE);    p.setBrush(QtCore.Qt.NoBrush)
-        p.drawEllipse(QtCore.QRectF(c.x()-r, c.y()-r, 2*r, 2*r))
+        if self._show_circle:
+            if self._hl_circle:
+                p.setPen(self.PEN_CIRCLE_HL); p.setBrush(self.BRUSH_CIRC_HL)
+            else:
+                p.setPen(self.PEN_CIRCLE);    p.setBrush(QtCore.Qt.NoBrush)
+            p.drawEllipse(QtCore.QRectF(c.x()-r, c.y()-r, 2*r, 2*r))
 
         # 文本：居中 + 自动换行 + 字号自适配
         label = (self.model.label or "").strip()
-        if visible_for_side and label:
+        if visible_for_side and self._show_label and label:
             box_side = min(rect.width(), rect.height()) * 0.9
             text_rect = QtCore.QRectF(c.x() - box_side/2.0,
                                       c.y() - box_side/2.0,
@@ -274,12 +281,13 @@ class DifferenceItem(QtWidgets.QGraphicsObject):
             p.drawText(text_rect, flags, label)
 
         # 角把手
-        hs = self.HANDLE_SIZE
-        p.setPen(self.HANDLE_PEN); p.setBrush(self.HANDLE_BR)
-        tl = rect.topLeft(); tr = rect.topRight()
-        br = rect.bottomRight(); bl = rect.bottomLeft()
-        for ptc in (tl, tr, br, bl):
-            p.drawEllipse(QtCore.QRectF(ptc.x()-hs/2, ptc.y()-hs/2, hs, hs))
+        if self._show_rect:
+            hs = self.HANDLE_SIZE
+            p.setPen(self.HANDLE_PEN); p.setBrush(self.HANDLE_BR)
+            tl = rect.topLeft(); tr = rect.topRight()
+            br = rect.bottomRight(); bl = rect.bottomLeft()
+            for ptc in (tl, tr, br, bl):
+                p.drawEllipse(QtCore.QRectF(ptc.x()-hs/2, ptc.y()-hs/2, hs, hs))
 
     def boundingRect(self) -> QtCore.QRectF:
         """基于缓存尺寸，遵守 Qt 的几何契约。"""
@@ -328,27 +336,28 @@ class DifferenceItem(QtWidgets.QGraphicsObject):
         rect = self._current_rect_local()
 
         # 角优先
-        corner = self._hit_corner(rect, pos)
-        if corner >= 0:
-            self.setCursor(QtCore.Qt.SizeFDiagCursor if corner in (0, 2) else QtCore.Qt.SizeBDiagCursor)
-            self._set_hover_state(rect_hl=True, circ_hl=False)
-            return
+        if self._show_rect:
+            corner = self._hit_corner(rect, pos)
+            if corner >= 0:
+                self.setCursor(QtCore.Qt.SizeFDiagCursor if corner in (0, 2) else QtCore.Qt.SizeBDiagCursor)
+                self._set_hover_state(rect_hl=True, circ_hl=False)
+                return
 
-        # 边
-        edge = self._hit_edge(rect, pos)
-        if edge:
-            self.setCursor(QtCore.Qt.SizeHorCursor if edge in ('L','R') else QtCore.Qt.SizeVerCursor)
-            self._set_hover_state(rect_hl=True, circ_hl=False)
-            return
+            # 边
+            edge = self._hit_edge(rect, pos)
+            if edge:
+                self.setCursor(QtCore.Qt.SizeHorCursor if edge in ('L','R') else QtCore.Qt.SizeVerCursor)
+                self._set_hover_state(rect_hl=True, circ_hl=False)
+                return
 
         # 圆
-        if self._hit_circle(pos):
+        if self._show_circle and self._hit_circle(pos):
             self.setCursor(QtCore.Qt.OpenHandCursor)
             self._set_hover_state(rect_hl=False, circ_hl=True)
             return
 
         # 矩形内部也高亮
-        if rect.contains(pos):
+        if self._show_rect and rect.contains(pos):
             self.setCursor(QtCore.Qt.OpenHandCursor)
             self._set_hover_state(rect_hl=True, circ_hl=False)
             return
@@ -380,6 +389,8 @@ class DifferenceItem(QtWidgets.QGraphicsObject):
 
         # 圆命中优先
         if self._hit_circle(e.pos()):
+            if not self._show_circle:
+                return False
             self._mode = self.Mode.DRAG_CIRCLE
             self.setCursor(QtCore.Qt.ClosedHandCursor)
             # 记录按下时圆心
@@ -591,4 +602,12 @@ class DifferenceItem(QtWidgets.QGraphicsObject):
     def setVis(self, show_rect: bool, show_circle: bool, show_label: bool):
         # 这里仍可扩展：若需要真正的“隐藏圆/矩形/文字”，可以加局部变量控制
         # 简化起见，先保持全部显示；如需开关，可仿照原有结构加 3 个布尔并在 paint 中判断
-        self.update()
+        changed = False
+        if self._show_rect   != bool(show_rect):   self._show_rect   = bool(show_rect);   changed = True
+        if self._show_circle != bool(show_circle): self._show_circle = bool(show_circle); changed = True
+        if self._show_label  != bool(show_label):  self._show_label  = bool(show_label);  changed = True
+        if changed:
+            # 关闭矩形时去掉矩形高亮；关闭圆时去掉圆高亮
+            if not self._show_rect:   self._hl_rect = False
+            if not self._show_circle: self._hl_circle = False
+            self.update()
