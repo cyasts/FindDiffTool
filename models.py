@@ -35,3 +35,10 @@ class Difference:
     hint_level: int = 1
     cx: float = -1.0
     cy: float = -1.0
+    # click area
+    click_customized: bool = False
+    ccx: float = -1.0
+    ccy: float = -1.0
+    ca: float = 0.0 #长轴（rect为半宽，ellipse为长轴）
+    cb: float = 0.0 #短轴（rect为半高，ellipse为短轴）
+    cshape: str = 'rect' # 'rect' | 'ellipse' | 'None'

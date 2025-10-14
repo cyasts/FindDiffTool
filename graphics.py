@@ -48,6 +48,19 @@ class DifferenceModel(QtCore.QObject):
     def label(self):       return self.data.label
     @property
     def category(self):    return self.data.category
+    # ------- 点击区域（补充） -------
+    @property
+    def click_customized(self): return bool(self.data.click_customized)
+    @property
+    def click_shape(self):  return self.data.cshape
+    @property
+    def click_cx(self):     return float(self.data.ccx)
+    @property
+    def click_cy(self):     return float(self.data.ccy)
+    @property
+    def click_a(self):      return float(self.data.ca)
+    @property
+    def click_b(self):      return float(self.data.cb)
 
     # ------- 自动 hint 计算（半径以内切圆上限） -------
     def _auto_hint_level(self, w: float, h: float) -> int:
@@ -97,6 +110,40 @@ class DifferenceModel(QtCore.QObject):
         self.data.hint_level = lvl
         self.anyChanged.emit(source)
 
+    # ------- 设置 API -------
+    def set_click_center(self, cx_abs: float, cy_abs: float, *, source=None):
+        if self._updating: return
+        d = self.data
+        cx_abs, cy_abs = float(cx_abs), float(cy_abs)
+        changed = (cx_abs != getattr(d, "ccx", -1.0)) or (cy_abs != getattr(d, "ccy", -1.0))
+        if not changed: return
+        d.ccx, d.ccy = cx_abs, cy_abs
+        try: d.click_customized = True
+        except Exception: pass
+        self.anyChanged.emit(source)
+
+    def set_click_axes(self, a: float, b: float, *, source=None):
+        if self._updating: return
+        d = self.data
+        a = max(1.0, float(a)); b = max(1.0, float(b))
+        changed = (a != getattr(d, "ca", 0.0)) or (b != getattr(d, "cb", 0.0))
+        if not changed: return
+        d.ca, d.cb = a, b
+        try: d.click_customized = True
+        except Exception: pass
+        self.anyChanged.emit(source)
+
+    def set_click_shape(self, shape: str, *, source=None):
+        if self._updating: return
+        d = self.data
+        shape = (str(shape) or "rect").lower()
+        shape = str(shape) if shape in ("rect", "ellipse") else "rect"
+        if shape == getattr(d, "cshape", "rect"): return
+        d.cshape = shape
+        try: d.click_customized = True
+        except Exception: pass
+        self.anyChanged.emit(source)
+
     # 可选：批量更新（避免中间反复发信号）
     def begin(self): self._updating = True
     def end(self, *, source=None):
@@ -139,6 +186,15 @@ class DifferenceItem(QtWidgets.QGraphicsObject):
     PEN_RECT_HL   = QtGui.QPen(QtGui.QColor('#ff1744'), 3)
     BRUSH_RECT_HL = QtGui.QBrush(QtGui.QColor(255, 23, 68, 48))
 
+    # 新增：蓝色点击区域
+    PEN_CLICK = QtGui.QPen(QtGui.QColor('#1976d2'), 2)
+    BRUSH_CLICK = QtGui.QBrush(QtGui.QColor(25, 118, 210, 24))
+    PEN_CLICK_HL = QtGui.QPen(QtGui.QColor('#42a5f5'), 3)
+    BRUSH_CLICK_HL = QtGui.QBrush(QtGui.QColor(66, 165, 245, 36))
+
+    HANDLE_BR_CLICK = QtGui.QBrush(QtGui.QColor('#1976d2'))   # 蓝色（和点击区域一致）
+    HANDLE_PEN      = QtGui.QPen(QtCore.Qt.NoPen)
+
     PEN_CIRCLE    = QtGui.QPen(QtGui.QColor('#00c853'), 3)
     PEN_CIRCLE_HL = QtGui.QPen(QtGui.QColor('#00e676'), 4)
     BRUSH_CIRC_HL = QtGui.QBrush(QtGui.QColor(0, 230, 118, 30))
@@ -152,6 +208,7 @@ class DifferenceItem(QtWidgets.QGraphicsObject):
 
     class Mode:
         NONE=0; MOVE=1; RESIZE_CORNER=2; RESIZE_EDGE=3; DRAG_CIRCLE=4
+        CLICK_MOVE=5; CLICK_EDGE=6; CLICK_CORNER=7
 
     def __init__(self, diff: Difference,
                  color: Optional[QtGui.QColor] = None,
@@ -173,6 +230,7 @@ class DifferenceItem(QtWidgets.QGraphicsObject):
         self._selected_alpha: int = 200
         self._hl_rect   = False
         self._hl_circle = False
+        self._hl_click  = False
 
         self._mode = self.Mode.NONE
         self._drag_corner = -1
@@ -184,9 +242,12 @@ class DifferenceItem(QtWidgets.QGraphicsObject):
         self._is_resizing    = False
 
         # 可见性（内部控制，默认全开）
+        self._show_click = True
         self._show_rect = True
         self._show_circle = True
         self._show_label = True
+
+        self._cached_bounds_rect = self._compute_bounds_union()
 
         # 仅缓存“上一帧尺寸”
         self._cached_rect_size = QtCore.QSizeF(
@@ -195,7 +256,7 @@ class DifferenceItem(QtWidgets.QGraphicsObject):
         )
 
         # 性能/Flags
-        self.setCacheMode(QtWidgets.QGraphicsItem.DeviceCoordinateCache)
+        self.setCacheMode(QtWidgets.QGraphicsItem.NoCache)
         self.setFlag(QtWidgets.QGraphicsItem.ItemIsMovable, True)              # 使用内置拖动
         self.setFlag(QtWidgets.QGraphicsItem.ItemSendsGeometryChanges, True)   # 以便截获移动
         self.setAcceptedMouseButtons(QtCore.Qt.LeftButton)
@@ -235,6 +296,70 @@ class DifferenceItem(QtWidgets.QGraphicsObject):
         cx = max(r, min(cx, w - r))
         cy = max(r, min(cy, h - r))
         return QtCore.QPointF(cx, cy), r
+    
+    def _current_click_local(self) -> Tuple[QtCore.QPointF, float, float, str]:
+        """
+        返回 (局部中心, a, b, shape)；不对中心和半轴做红框约束。
+        回退：若参数缺省/无效，使用红框中心和半轴；圆强制 a==b。
+        """
+        rect = self._current_rect_local()
+        w, h = rect.width(), rect.height()
+
+        cx_abs = self.model.click_cx
+        cy_abs = self.model.click_cy
+        a = self.model.click_a
+        b = self.model.click_b
+        shape = self.model.click_shape
+
+        # 回退（未自定义/无效）
+        if cx_abs < 0 or cy_abs < 0 or a <= 0 or b <= 0:
+            c = QtCore.QPointF(w/2, h/2)
+            if shape == "rect":
+                a, b = w/2, h/2
+            else:
+                r = min(w, h) / 2
+                a = b = r
+                shape = "ellipse"
+            return c, float(a), float(b), shape
+
+        # 绝对 → 本地（不夹紧到红框）
+        local_cx = cx_abs - self.model.x
+        local_cy = cy_abs - self.model.y
+
+        # 半轴最小值兜底（不做上限）
+        a = max(1.0, float(a))
+        b = max(1.0, float(b))
+        return QtCore.QPointF(local_cx, local_cy), float(a), float(b), shape
+
+
+    def _click_handles(self, c: QtCore.QPointF, a: float, b: float, shape: str):
+        """
+        始终返回 8 个手柄：TL/TR/BR/BL（角） + L/R/T/B（边）
+        a,b 为半轴（rect=半宽/半高；ellipse=长/短轴）
+        """
+        cx, cy = c.x(), c.y()
+
+        # 角点
+        TL = QtCore.QPointF(cx - a, cy - b)
+        TR = QtCore.QPointF(cx + a, cy - b)
+        BR = QtCore.QPointF(cx + a, cy + b)
+        BL = QtCore.QPointF(cx - a, cy + b)
+
+        # 边点
+        L  = QtCore.QPointF(cx - a, cy)
+        R  = QtCore.QPointF(cx + a, cy)
+        T  = QtCore.QPointF(cx,     cy - b)
+        B  = QtCore.QPointF(cx,     cy + b)
+
+        return {"TL": TL, "TR": TR, "BR": BR, "BL": BL,
+                "L": L, "R": R, "T": T, "B": B}
+
+    def _drawRectCrisp(self, p: QtGui.QPainter, rect: QtCore.QRectF):
+        p.save()
+        p.translate(0.5, 0.5)
+        r = QtCore.QRectF(int(rect.x()), int(rect.y()), int(rect.width()), int(rect.height()))
+        p.drawRect(r)
+        p.restore()
 
     # -------------------- 绘制 --------------------
     def paint(self, p: QtGui.QPainter, option, widget=None):
@@ -289,15 +414,97 @@ class DifferenceItem(QtWidgets.QGraphicsObject):
             for ptc in (tl, tr, br, bl):
                 p.drawEllipse(QtCore.QRectF(ptc.x()-hs/2, ptc.y()-hs/2, hs, hs))
 
-    def boundingRect(self) -> QtCore.QRectF:
-        """基于缓存尺寸，遵守 Qt 的几何契约。"""
-        sz = self._cached_rect_size
-        return QtCore.QRectF(-4, -4, sz.width()+8, sz.height()+8)
+        if self._show_click:
+            c, a, b, shape = self._current_click_local()
+            p.setPen(self.PEN_CLICK if not self._hl_click else self.PEN_CLICK_HL)
+            p.setBrush(self.BRUSH_CLICK if not self._hl_click else self.BRUSH_CLICK_HL)
+            if shape == "rect":
+                p.drawRect(QtCore.QRectF(c.x()-a, c.y()-b, 2*a, 2*b))
+            else:  # ellipse
+                p.drawEllipse(QtCore.QRectF(c.x()-a, c.y()-b, 2*a, 2*b))
 
+            hs = self.HANDLE_SIZE
+            p.setPen(self.HANDLE_PEN); p.setBrush(self.HANDLE_BR_CLICK)
+            for ptc in self._click_handles(c, a, b, shape).values():
+                p.drawEllipse(QtCore.QRectF(ptc.x()-hs/2, ptc.y()-hs/2, hs, hs))
+
+    def _scene_pick_radius(self, px: float = 12.0) -> float:
+        """
+        把屏幕像素(px)换算成当前场景坐标下的长度，随 QGraphicsView 的缩放自适应。
+        无视图/无场景时返回 px 作为兜底。
+        """
+        scene = self.scene()
+        if scene is None:
+            return float(px)
+
+        views = scene.views()
+        if not views:
+            return float(px)
+
+        view = views[0]
+        # QTransform.inverted() 在 PySide6 返回 (inv, ok)
+        inv, ok = view.transform().inverted()
+        if not ok:
+            return float(px)
+
+        # 把一个 px x px 的屏幕矩形映射到场景，取其宽作为命中半径
+        rect_in_scene = inv.mapRect(QtCore.QRectF(0.0, 0.0, float(px), float(px)))
+        # 最小兜底，避免过小导致难命中
+        return max(2.0, rect_in_scene.width())
+    
+    def _compute_bounds_union(self) -> QtCore.QRectF:
+        rect = self._current_rect_local()
+        uni  = QtCore.QRectF(rect)
+        if self._show_click:
+            c, a, b, _ = self._current_click_local()
+            click_rect = QtCore.QRectF(c.x()-a, c.y()-b, 2*a, 2*b)
+            uni = uni.united(click_rect)
+
+        # ★ margin 取 hand-pick 半径与 8 的较大者，确保手柄泡泡也在 boundingRect 内
+        margin = max(8.0, self._scene_pick_radius(12.0))
+        return uni.adjusted(-margin, -margin, margin, margin)
+
+    def _refresh_bounds_if_needed(self):
+        old = QtCore.QRectF(self._cached_bounds_rect)
+        new = self._compute_bounds_union()
+        if (abs(new.x()-old.x())>1e-6 or abs(new.y()-old.y())>1e-6 or
+            abs(new.width()-old.width())>1e-6 or abs(new.height()-old.height())>1e-6):
+            self.prepareGeometryChange()
+            self._cached_bounds_rect = new
+            # 同时无效化旧+新区域，抹干净残影
+            self.update(old.united(new))
+
+    def boundingRect(self) -> QtCore.QRectF:
+        return QtCore.QRectF(self._cached_bounds_rect)
+    
     def shape(self) -> QtGui.QPainterPath:
         path = QtGui.QPainterPath()
-        sz = self._cached_rect_size
-        path.addRect(QtCore.QRectF(0, 0, sz.width(), sz.height()))
+        rect = self._current_rect_local()
+        path.addRect(rect)
+
+        if self._show_click:
+            c, a, b, shape = self._current_click_local()
+            click_rect = QtCore.QRectF(c.x()-a, c.y()-b, 2*a, 2*b)
+            click = QtGui.QPainterPath()
+            if shape == "rect":
+                click.addRect(click_rect)
+            else:
+                click.addEllipse(click_rect)
+
+            # 椭圆边沿粗描边（整条边易点）
+            stroker = QtGui.QPainterPathStroker()
+            stroker.setWidth(self._scene_pick_radius(16.0))
+            fat_edge = stroker.createStroke(click)
+
+            # ★ 关键：把 8 个手柄“泡泡”并入 shape（角点在椭圆外也能接收事件）
+            pick = self._scene_pick_radius(12.0)
+            handles = self._click_handles(c, a, b, shape)
+            handle_path = QtGui.QPainterPath()
+            for pt in handles.values():
+                handle_path.addEllipse(QtCore.QRectF(pt.x()-pick, pt.y()-pick, 2*pick, 2*pick))
+
+            path = path.united(click).united(fat_edge).united(handle_path)
+
         return path
 
     # ====== 文本字号自适配 ======
@@ -335,48 +542,65 @@ class DifferenceItem(QtWidgets.QGraphicsObject):
         pos = e.pos()
         rect = self._current_rect_local()
 
+        # 点击区域手柄优先
+        if self._show_click:
+            hcode = self._hit_click_handle(pos)
+            if hcode:
+                if hcode in ("L","R"): self.setCursor(QtCore.Qt.SizeHorCursor)
+                elif hcode in ("T","B"): self.setCursor(QtCore.Qt.SizeVerCursor)
+                elif hcode in ("TL", "BR"): self.setCursor(QtCore.Qt.SizeFDiagCursor)
+                else : self.setCursor(QtCore.Qt.SizeBDiagCursor)
+                self._set_hover_state(rect_hl=False, circ_hl=False, click_hl=True); return
+
+            # 点击区域本体
+            if self._hit_click_inside(pos):
+                self.setCursor(QtCore.Qt.OpenHandCursor)
+                self._set_hover_state(rect_hl=False, circ_hl=False, click_hl=True); return
+        # 矩形
         # 角优先
         if self._show_rect:
             corner = self._hit_corner(rect, pos)
             if corner >= 0:
                 self.setCursor(QtCore.Qt.SizeFDiagCursor if corner in (0, 2) else QtCore.Qt.SizeBDiagCursor)
-                self._set_hover_state(rect_hl=True, circ_hl=False)
+                self._set_hover_state(rect_hl=True, circ_hl=False, click_hl=False)
                 return
 
             # 边
             edge = self._hit_edge(rect, pos)
             if edge:
                 self.setCursor(QtCore.Qt.SizeHorCursor if edge in ('L','R') else QtCore.Qt.SizeVerCursor)
-                self._set_hover_state(rect_hl=True, circ_hl=False)
+                self._set_hover_state(rect_hl=True, circ_hl=False, click_hl=False)
                 return
 
         # 圆
         if self._show_circle and self._hit_circle(pos):
             self.setCursor(QtCore.Qt.OpenHandCursor)
-            self._set_hover_state(rect_hl=False, circ_hl=True)
+            self._set_hover_state(rect_hl=False, circ_hl=True, click_hl=False)
             return
 
         # 矩形内部也高亮
         if self._show_rect and rect.contains(pos):
             self.setCursor(QtCore.Qt.OpenHandCursor)
-            self._set_hover_state(rect_hl=True, circ_hl=False)
+            self._set_hover_state(rect_hl=True, circ_hl=False, click_hl=False)
             return
 
         self.setCursor(QtCore.Qt.OpenHandCursor)
-        self._set_hover_state(rect_hl=False, circ_hl=False)
+        self._set_hover_state(rect_hl=False, circ_hl=False, click_hl=False)
         super().hoverMoveEvent(e)
 
     def hoverLeaveEvent(self, e: QtWidgets.QGraphicsSceneHoverEvent) -> None:
         self.unsetCursor()
-        self._set_hover_state(rect_hl=False, circ_hl=False)
+        self._set_hover_state(rect_hl=False, circ_hl=False, click_hl=False)
         super().hoverLeaveEvent(e)
 
-    def _set_hover_state(self, rect_hl: bool, circ_hl: bool):
+    def _set_hover_state(self, rect_hl: bool, circ_hl: bool, click_hl: bool=False):
         changed = False
         if self._hl_rect != rect_hl:
             self._hl_rect = rect_hl; changed = True
         if self._hl_circle != circ_hl:
             self._hl_circle = circ_hl; changed = True
+        if self._hl_click != click_hl:
+            self._hl_click = click_hl; changed = True
         if changed:
             self.update()
 
@@ -386,6 +610,22 @@ class DifferenceItem(QtWidgets.QGraphicsObject):
         self._drag_corner = -1
         self._edge_code = ''
         rect = self._current_rect_local()
+
+        hcode = self._hit_click_handle(e.pos())
+        if hcode:
+            self._mode = self.Mode.CLICK_EDGE if hcode in ("L","R","T","B") else self.Mode.CLICK_CORNER
+            self._click_hcode = hcode
+            self._click_press_local = e.pos()
+            self._click_press_center, self._click_press_a, self._click_press_b, self._click_press_shape = self._current_click_local()
+            self.setCursor(QtCore.Qt.ClosedHandCursor)
+            e.accept(); return
+        # 点击区域本体
+        if self._hit_click_inside(e.pos()):
+            self._mode = self.Mode.CLICK_MOVE
+            self._click_press_local = e.pos()
+            self._click_press_center, self._click_press_a, self._click_press_b, self._click_press_shape = self._current_click_local()
+            self.setCursor(QtCore.Qt.ClosedHandCursor)
+            e.accept(); return
 
         # 圆命中优先
         if self._hit_circle(e.pos()):
@@ -483,6 +723,49 @@ class DifferenceItem(QtWidgets.QGraphicsObject):
             cy = max(r, min(p_local.y(), rect.height() - r))
             self.model.set_circle(cx, cy, source=self)
             e.accept(); return
+        
+        if self._mode in (self.Mode.CLICK_MOVE, self.Mode.CLICK_EDGE, self.Mode.CLICK_CORNER):
+            rect = self._current_rect_local()
+            w, h = rect.width(), rect.height()
+            cur = self.mapFromScene(e.scenePos())
+
+            c0, a0, b0, shape = self._click_press_center, self._click_press_a, self._click_press_b, self._click_press_shape
+            cx, cy = c0.x(), c0.y()
+            a, b = a0, b0
+
+            if self._mode == self.Mode.CLICK_MOVE:
+                dx = cur.x() - self._click_press_local.x()
+                dy = cur.y() - self._click_press_local.y()
+                cx = c0.x() + dx; cy = c0.y() + dy
+                cx, cy, a_ok, b_ok = self._clamp_click_to_scene(cx, cy, a0, b0, shape)
+                self.model.set_click_center(self.model.x + cx, self.model.y + cy, source=self)
+                e.accept(); return
+
+            if self._mode == self.Mode.CLICK_EDGE:
+                code = self._click_hcode
+                cx, cy = c0.x(), c0.y()
+                a, b = a0, b0
+                if code in ("L","R"):   a = abs(cur.x() - cx)
+                elif code in ("T","B"): b = abs(cur.y() - cy)
+                cx, cy, a, b = self._clamp_click_to_scene(cx, cy, a, b, shape)
+                self.model.set_click_axes(a, b, source=self)
+                e.accept(); return
+
+            if self._mode == self.Mode.CLICK_CORNER:
+                cx, cy = c0.x(), c0.y()
+                if shape == "rect":
+                    a_new = abs(cur.x() - cx)
+                    b_new = abs(cur.y() - cy)
+                else:  # ellipse：等比
+                    v0 = self._click_press_local - c0
+                    v1 = cur - c0
+                    len0 = max(1e-6, QtCore.QLineF(QtCore.QPointF(0,0), v0).length())
+                    s = QtCore.QLineF(QtCore.QPointF(0,0), v1).length() / len0
+                    a_new = max(1.0, a0 * s)
+                    b_new = max(1.0, b0 * s)
+                cx, cy, a_new, b_new = self._clamp_click_to_scene(cx, cy, a_new, b_new, shape)
+                self.model.set_click_axes(a_new, b_new, source=self)
+                e.accept(); return
 
         e.ignore()
 
@@ -497,6 +780,43 @@ class DifferenceItem(QtWidgets.QGraphicsObject):
             except Exception:
                 pass
         super().mouseReleaseEvent(e)
+
+    def contextMenuEvent(self, e: QtWidgets.QGraphicsSceneContextMenuEvent) -> None:
+        if not self._show_click:
+            return super().contextMenuEvent(e)
+
+        pos = e.pos()
+        hit_handle = self._hit_click_handle(pos)
+        hit_inside = self._hit_click_inside(pos)
+        if not (hit_handle or hit_inside):
+            return super().contextMenuEvent(e)
+
+        # 当前形状
+        _, _, _, shape = self._current_click_local()
+
+        menu = QtWidgets.QMenu(self.scene().views()[0] if self.scene() and self.scene().views() else None)
+        act_toggle = menu.addAction("改为椭圆" if shape == "rect" else "改为矩形")
+
+        # 关键修复：把 screenPos 处理成 QPoint
+        sp = e.screenPos()
+        if isinstance(sp, QtCore.QPointF):
+            global_pt = sp.toPoint()
+        else:
+            global_pt = sp  # 已经是 QPoint
+
+        chosen = menu.exec(global_pt)  # 这里传 QPoint 即可
+        if chosen is None:
+            e.accept(); return
+
+        if chosen == act_toggle:
+            new_shape = "ellipse" if shape == "rect" else "rect"
+            self.model.set_click_shape(new_shape, source=self)
+            if hasattr(self, "_refresh_bounds_if_needed"):
+                self._refresh_bounds_if_needed()
+            self.update()
+            e.accept(); return
+
+        e.accept()
 
     # -------------------- 外部选中态 --------------------
     def setExternalSelected(self, selected: bool, *, raise_z: bool = True) -> None:
@@ -535,6 +855,7 @@ class DifferenceItem(QtWidgets.QGraphicsObject):
             self.prepareGeometryChange()
             self._cached_rect_size = QtCore.QSizeF(new_w, new_h)
         self.setPos(self.model.x, self.model.y)
+        self._refresh_bounds_if_needed()
         self._text_cache_key = None
         self.update()
         # 尺寸变化可能影响半径（hint_level 已由 model 自动更新）
@@ -547,6 +868,7 @@ class DifferenceItem(QtWidgets.QGraphicsObject):
     @QtCore.Slot(object)
     def _on_model_any_changed(self, source):
         self._text_cache_key = None
+        self._refresh_bounds_if_needed()
         self.update()
 
     # -------------------- 半径信号 --------------------
@@ -574,6 +896,30 @@ class DifferenceItem(QtWidgets.QGraphicsObject):
     def _hit_circle(self, pos: QtCore.QPointF) -> bool:
         c, r = self._current_circle_local()
         return QtCore.QLineF(pos, c).length() <= r
+    
+    def _hit_click_handle(self, pos):
+        if not self._show_click: return None
+        c, a, b, shape = self._current_click_local()
+        handles = self._click_handles(c, a, b, shape)
+        pick_edge   = self._scene_pick_radius(16.0)  # L/R/T/B 更宽松
+        pick_corner = self._scene_pick_radius(12.0)
+
+        for code in ("L","R","T","B"):
+            if code in handles and QtCore.QLineF(pos, handles[code]).length() <= pick_edge:
+                return code
+        for code in ("TL","TR","BR","BL"):
+            if code in handles and QtCore.QLineF(pos, handles[code]).length() <= pick_corner:
+                return code
+        return None
+    
+    def _hit_click_inside(self, pos: QtCore.QPointF) -> bool:
+        if not self._show_click: return False
+        c, a, b, shape = self._current_click_local()
+        dx, dy = pos.x()-c.x(), pos.y()-c.y()
+        if shape == "rect":
+            return abs(dx) <= a and abs(dy) <= b
+        # ellipse
+        return (dx*dx)/(a*a+1e-6) + (dy*dy)/(b*b+1e-6) <= 1.0
 
     # -------------------- 场景几何工具 --------------------
     def _clamp_scene_rect(self, tl: QtCore.QPointF, br: QtCore.QPointF,
@@ -592,6 +938,27 @@ class DifferenceItem(QtWidgets.QGraphicsObject):
         br = QtCore.QPointF(min(scene_rect.right(),  tl.x() + w),
                             min(scene_rect.bottom(), tl.y() + h))
         return tl, br
+    
+    def _clamp_click_to_scene(self, cx, cy, a, b, shape: str):
+        scene_rect = self.scene().sceneRect() if self.scene() else QtCore.QRectF(-1e6,-1e6,2e6,2e6)
+        # 中心（场景）
+        cx_scene = self.model.x + cx
+        cy_scene = self.model.y + cy
+
+        # 允许超出红框，但保证在场景内完整可见
+        max_a = min(cx_scene - scene_rect.left(), scene_rect.right() - cx_scene)
+        max_b = min(cy_scene - scene_rect.top(),  scene_rect.bottom() - cy_scene)
+        max_a = max(1.0, float(max_a))
+        max_b = max(1.0, float(max_b))
+
+        a = max(1.0, min(float(a), max_a))
+        b = max(1.0, min(float(b), max_b))
+
+        cx_scene = max(scene_rect.left()  + a, min(cx_scene, scene_rect.right()  - a))
+        cy_scene = max(scene_rect.top()   + b, min(cy_scene, scene_rect.bottom() - b))
+
+        return cx_scene - self.model.x, cy_scene - self.model.y, a, b
+
 
     # -------------------- 外部 API --------------------
     def updateLabel(self):
@@ -599,10 +966,11 @@ class DifferenceItem(QtWidgets.QGraphicsObject):
         self._text_cache_key = None
         self.update()
 
-    def setVis(self, show_rect: bool, show_circle: bool, show_label: bool):
+    def setVis(self, show_click: bool, show_rect: bool, show_circle: bool, show_label: bool):
         # 这里仍可扩展：若需要真正的“隐藏圆/矩形/文字”，可以加局部变量控制
         # 简化起见，先保持全部显示；如需开关，可仿照原有结构加 3 个布尔并在 paint 中判断
         changed = False
+        if self._show_click  != bool(show_click):  self._show_click  = bool(show_click);  changed = True
         if self._show_rect   != bool(show_rect):   self._show_rect   = bool(show_rect);   changed = True
         if self._show_circle != bool(show_circle): self._show_circle = bool(show_circle); changed = True
         if self._show_label  != bool(show_label):  self._show_label  = bool(show_label);  changed = True
@@ -610,4 +978,5 @@ class DifferenceItem(QtWidgets.QGraphicsObject):
             # 关闭矩形时去掉矩形高亮；关闭圆时去掉圆高亮
             if not self._show_rect:   self._hl_rect = False
             if not self._show_circle: self._hl_circle = False
+            self._refresh_bounds_if_needed()
             self.update()

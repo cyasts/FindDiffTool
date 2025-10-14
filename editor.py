@@ -88,7 +88,9 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
         self.up_view = ImageView(self.up_scene)
         self.down_view = ImageView(self.down_scene)
 
-        self.toggle_regions = QtWidgets.QCheckBox("显示点击区域")
+        self.toggle_click_region = QtWidgets.QCheckBox("显示点击区域")
+        self.toggle_click_region.setChecked(True)
+        self.toggle_regions = QtWidgets.QCheckBox("显示茬图区域")
         self.toggle_regions.setChecked(True)
         self.toggle_hints = QtWidgets.QCheckBox("显示绿圈")
         self.toggle_hints.setChecked(True)
@@ -135,6 +137,7 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
         bottom_layout.addWidget(self.btn_submit)
         bottom_layout.addWidget(self.btn_close)
         bottom_layout.addStretch(1)
+        bottom_layout.addWidget(self.toggle_click_region)
         bottom_layout.addWidget(self.toggle_regions)
         bottom_layout.addWidget(self.toggle_hints)
         bottom_layout.addWidget(self.toggle_labels)
@@ -143,7 +146,7 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
 
         # Ensure vertical centering of buttons and controls
         for w in [self.total_count, self.btn_save, self.btn_submit, self.btn_close,
-                  self.toggle_regions, self.toggle_hints, self.toggle_labels, self.toggle_ai_preview]:
+                  self.toggle_click_region, self.toggle_regions, self.toggle_hints, self.toggle_labels, self.toggle_ai_preview]:
             bottom_layout.setAlignment(w, QtCore.Qt.AlignVCenter)
 
         self.status_bar = QtWidgets.QStatusBar(self)
@@ -188,6 +191,7 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
         self.btn_save.clicked.connect(self.on_save_clicked)
         self.btn_submit.clicked.connect(self.on_ai_process)
         self.btn_close.clicked.connect(self.close)
+        self.toggle_click_region.toggled.connect(self.refresh_visibility)
         self.toggle_regions.toggled.connect(self.refresh_visibility)
         self.toggle_hints.toggled.connect(self.refresh_visibility)
         self.toggle_labels.toggled.connect(self.refresh_visibility)
@@ -405,6 +409,12 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
             cx = rect.width() / 2,
             cy = rect.height() / 2,
             hint_level=1,
+            click_customized=False,
+            ccx=rect.center().x(),
+            ccy=rect.center().y(),
+            ca=rect.width() / 2,
+            cb=rect.height() / 2,
+            cshape='rect'
         )
         self.differences.append(diff)
         self._add_rect_items(diff)
@@ -733,9 +743,10 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
         show_regions = self.toggle_regions.isChecked()
         show_hints = self.toggle_hints.isChecked()
         show_labels = self.toggle_labels.isChecked()
+        show_click_region = self.toggle_click_region.isChecked()
         for d in (self.rect_items_up, self.rect_items_down):
             for item in d.values():
-                item.setVis(show_regions, show_hints, show_labels)
+                item.setVis(show_click_region, show_regions, show_hints, show_labels)
 
     # === AI 预览覆盖 ===
     def on_toggle_ai_preview(self) -> None:
@@ -947,6 +958,11 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
             cx = max(0.0, min(1.0, cx))
             cy = max(0.0, min(1.0, cy))
 
+            ccx = to_percent_x(d.ccx)
+            ccy = to_percent_y_bottom(d.ccy)
+            ccx = max(0.0, min(1.0, ccx))
+            ccy = max(0.0, min(1.0, ccy))
+
             lvl = d.hint_level
             # 从 hint level 获取半径（修正list越界问题）
             if isinstance(lvl, int) and 1 <= lvl <= len(RADIUS_LEVELS):
@@ -954,19 +970,30 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
             else:
                 radius = 0
 
-            data["differences"].append({
+            entry = {
                 "id": d.id,
                 "name": d.name,
                 "section": ('down' if d.section == 'down' else 'up'),
                 "category": d.category or "",
                 "label": d.label or "",
-                "replaceImage":f"{file_name}_region{idx+1}.png",
+                "replaceImage": f"{file_name}_region{idx+1}.png",
                 "enabled": bool(d.enabled),
                 "points": points,
                 "hintLevel": int(lvl),
                 "circleCenter": {"x": cx, "y": cy},
                 "circleRadius": radius,
-            })
+                "click_customized": bool(d.click_customized),  # 只存标记
+            }
+            if d.click_customized:
+                entry.update({
+                    "click_x": ccx,
+                    "click_y": ccy,
+                    "click_a": d.ca,
+                    "click_b": d.cb,
+                    "click_type": d.cshape
+                })
+
+            data["differences"].append(entry)
 
         os.makedirs(self.level_dir(), exist_ok=True)
         cfg_path = self.config_json_path()
@@ -1054,6 +1081,26 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
             lvl = clamp_level_for_rect(raw_level, w_rect, h_rect)
             cx_local, cy_local = clamp_circle_center_local(cx_local, cy_local, w_rect, h_rect, lvl)
 
+            # 3) 二次点击区域（自定义 vs 回退）
+            #    兼容两种判断：显式标记 或 字段存在即视为自定义
+            click_customized = bool(diff.get('click_customized', False))
+            has_click_fields = ('click_x' in diff and 'click_y' in diff and 
+                                'click_a' in diff and 'click_b' in diff )
+            use_custom = click_customized or has_click_fields
+            shape = str(diff.get('click_type', 'rect'))  # 'rect' | 'ellipse' | 'circle'(如有)
+
+            if use_custom:
+                # click_x/click_y 为百分比(0~1)，反归一化为像素；a/b 按当前写法为像素半轴
+                ccx_abs = from_percent_x(float(diff.get('click_x', 0.0)))
+                ccy_abs = from_percent_y_bottom(float(diff.get('click_y', 0.0)))
+                ca = float(diff.get('click_a', 0.0))
+                cb = float(diff.get('click_b', 0.0))
+            else:
+                ccx_abs = min_x + w_rect/2.0
+                ccy_abs = min_y + h_rect/2.0
+                ca = w_rect/2.0
+                cb = h_rect/2.0
+
             d = Difference(
                 id=str(diff.get('id', now_id())),
                 name=str(diff.get('name', f"不同点 {len(self.differences) + 1}")),
@@ -1069,6 +1116,12 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
                 hint_level=int(lvl),
                 cx=float(cx_local),
                 cy=float(cy_local),
+                click_customized=use_custom,
+                cshape=shape,
+                ccx=float(ccx_abs),
+                ccy=float(ccy_abs),
+                ca=float(ca),
+                cb=float(cb)
             )
             self.differences.append(d)
             self._add_rect_items(d)
