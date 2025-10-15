@@ -39,14 +39,6 @@ def clamp_circle_center_local(cx_local: float, cy_local: float, w: float, h: flo
     cy = max(radius, min(cy_local, max(radius, h - radius)))
     return cx, cy
 
-def clamp_circle_center_local(cx_local: float, cy_local: float, w: float, h: float, level: int) -> Tuple[float, float]:
-    """把局部圆心夹到 [radius, w-radius] / [radius, h-radius]。"""
-    lvl = clamp_level(level)
-    radius = float(RADIUS_LEVELS[lvl - 1])
-    cx = max(radius, min(cx_local, max(radius, w - radius)))
-    cy = max(radius, min(cy_local, max(radius, h - radius)))
-    return cx, cy
-
 class DifferenceEditorWindow(QtWidgets.QMainWindow):
     def _set_completed_ui_disabled(self, disabled: bool):
         # 禁用保存、AI处理按钮
@@ -266,7 +258,7 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
         self._ai_timer = QtCore.QTimer(self)
         # Use a modal-looking progress dialog (non-blocking updates via signals)
         self._ai_dlg = QtWidgets.QProgressDialog("正在上传AI处理...", None, 0, max(1, int(total)), self)
-        self._ai_dlg.setWindowModality(QtCore.Qt.ApplicationModal)
+        self._ai_dlg.setWindowModality(QtCore.Qt.WindowModal)
         self._ai_dlg.setMinimumDuration(0)
         self._ai_dlg.setAutoClose(False)
         self._ai_dlg.setAutoReset(False)

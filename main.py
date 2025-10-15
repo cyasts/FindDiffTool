@@ -308,7 +308,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.set_status(f"打开失败：{reason.replace(os.linesep, ' ')}")
             return
 
-        win = DifferenceEditorWindow(pair=pair, config_dir=self.config_dir, parent=self)
+        win = DifferenceEditorWindow(pair=pair, config_dir=self.config_dir, parent=None)
         # keep a reference to avoid immediate GC when parented
         if not hasattr(self, "_open_editors"):
             self._open_editors = []
@@ -316,6 +316,26 @@ class MainWindow(QtWidgets.QMainWindow):
         win.destroyed.connect(lambda *_: self._open_editors.remove(win) if win in self._open_editors else None)
         win.show()
 
+    def closeEvent(self, event: QtGui.QCloseEvent) -> None:
+        dirty_editors = [w for w in getattr(self, "_open_editors", []) if getattr(w, "_is_dirty", False)]
+        if dirty_editors:
+            ret = QtWidgets.QMessageBox.question(
+                self,
+                "确认退出",
+                f"有 {len(dirty_editors)} 个编辑器尚未保存，是否要全部关闭？",
+                QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.Cancel,
+                QtWidgets.QMessageBox.Cancel
+            )
+            if ret != QtWidgets.QMessageBox.Yes:
+                event.ignore()
+                return
+
+        for win in list(getattr(self, "_open_editors", [])):
+            try:
+                win.close()
+            except Exception:
+                pass
+        event.accept()
 
 def main() -> int:
     app = QtWidgets.QApplication(sys.argv)
