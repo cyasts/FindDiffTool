@@ -427,6 +427,7 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
         self.rect_items_up[diff.id] = item_up
         self.rect_items_down[diff.id] = item_down
         item_up.radiusChanged.connect(self._update_radius_value_for_label)
+        self.refresh_visibility()
 
     def rebuild_lists(self) -> None:
         up = self.current_list('up')
