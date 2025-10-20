@@ -941,7 +941,12 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
                 d.cb = d.height / 2
                 d.cshape = 'rect'
 
+        cur = self.toggle_click_region.isChecked()
+        self.toggle_click_region.setChecked(not cur)
         self.refresh_visibility()
+        self.toggle_click_region.setChecked(cur)
+        self.refresh_visibility()
+
         self._make_dirty()
 
     def save_config(self) -> None:
@@ -1125,9 +1130,9 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
             # 3) 二次点击区域（自定义 vs 回退）
             #    兼容两种判断：显式标记 或 字段存在即视为自定义
             click_customized = bool(diff.get('click_customized', False))
-            has_click_fields = ('click_x' in diff and 'click_y' in diff and 
-                                'click_a' in diff and 'click_b' in diff )
-            use_custom = click_customized or has_click_fields
+            has_click_fields = ('click_x' in diff and 'click_y' in diff and
+                                'click_a' in diff and 'click_b' in diff)
+            use_custom = click_customized and has_click_fields
             shape = str(diff.get('click_type', 'rect'))  # 'rect' | 'ellipse' | 'circle'(如有)
 
             if use_custom:

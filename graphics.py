@@ -91,35 +91,35 @@ class DifferenceModel(QtCore.QObject):
     # ------- 设置 API -------
     def set_click_center(self, cx_abs: float, cy_abs: float, *, source=None):
         if self._updating: return
+        if self.data.click_customized is False:
+            return  # 未启用自定义点击区域，忽略设置
         d = self.data
         cx_abs, cy_abs = float(cx_abs), float(cy_abs)
         changed = (cx_abs != getattr(d, "ccx", -1.0)) or (cy_abs != getattr(d, "ccy", -1.0))
         if not changed: return
         d.ccx, d.ccy = cx_abs, cy_abs
-        try: d.click_customized = True
-        except Exception: pass
         self.anyChanged.emit(source)
 
     def set_click_axes(self, a: float, b: float, *, source=None):
         if self._updating: return
+        if self.data.click_customized is False:
+            return  # 未启用自定义点击区域，忽略设置
         d = self.data
         a = max(1.0, float(a)); b = max(1.0, float(b))
         changed = (a != getattr(d, "ca", 0.0)) or (b != getattr(d, "cb", 0.0))
         if not changed: return
         d.ca, d.cb = a, b
-        try: d.click_customized = True
-        except Exception: pass
         self.anyChanged.emit(source)
 
     def set_click_shape(self, shape: str, *, source=None):
         if self._updating: return
+        if self.data.click_customized is False:
+            return  # 未启用自定义点击区域，忽略设置
         d = self.data
         shape = (str(shape) or "rect").lower()
         shape = str(shape) if shape in ("rect", "ellipse") else "rect"
         if shape == getattr(d, "cshape", "rect"): return
         d.cshape = shape
-        try: d.click_customized = True
-        except Exception: pass
         self.anyChanged.emit(source)
 
     # 可选：批量更新（避免中间反复发信号）
@@ -1039,6 +1039,7 @@ class DifferenceItem(QtWidgets.QGraphicsObject):
         return hit.contains(pos)
     
     def _hit_click_handle(self, pos):
+        if not self.model.click_customized: return None
         if not self._show_click: return None
         c, a, b, shape = self._current_click_local()
         handles = self._click_handles(c, a, b, shape)
@@ -1054,7 +1055,8 @@ class DifferenceItem(QtWidgets.QGraphicsObject):
         return None
     
     def _hit_click_inside(self, pos: QtCore.QPointF) -> bool:
-        if not self._show_click: return False
+        if not self.model.click_customized: return False
+        if not self._show_click : return False
         c, a, b, shape = self._current_click_local()
         dx, dy = pos.x()-c.x(), pos.y()-c.y()
         if shape == "rect":
