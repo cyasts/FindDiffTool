@@ -68,26 +68,43 @@ def _render_regions_to_origin(base: QtGui.QImage, differences: List[Difference],
 
     return up_img, down_img
 
-def _render_circle_over_image(up_img: QImage, down_img: QImage, differences:List[Difference]) -> Tuple[QImage, QImage]:
+def _render_circle_over_image(up_img: QImage, down_img: QImage,
+                              differences: List[Difference]) -> Tuple[QImage, QImage]:
     u = up_img.copy()
     d = down_img.copy()
     W, H = u.width(), u.height()
     bounds = QtCore.QRect(0, 0, W, H)
 
     for diff in differences:
-        cx = diff.cx + diff.x
-        cy = diff.cy + diff.y
-        lvl = diff.hint_level
-        cpath = f":/img/c{lvl}.png"
-        circle = _qimage_from_path(cpath)
+        # 圆心：未设置则回退到红框中心（与编辑器一致）
+        cx = diff.cx if diff.cx >= 0 else (diff.x + diff.width  * 0.5)
+        cy = diff.cy if diff.cy >= 0 else (diff.y + diff.height * 0.5)
+
+        lvl = int(diff.hint_level)
+        circle = _qimage_from_path(f":/img/c{lvl}.png")
+
+        # 先记住原 DPR，避免 _to_premultiplied 之后丢失
+        dpr = circle.devicePixelRatio() if hasattr(circle, "devicePixelRatio") else 1.0
         circle = _to_premultiplied(circle)
-        r = _radius_for(lvl)
+        try:
+            if dpr and hasattr(circle, "setDevicePixelRatio"):
+                circle.setDevicePixelRatio(dpr)
+        except Exception:
+            pass
 
-        cx1, cx2 = _round_half_up(cx) - r, _round_half_up(cy) - r
+        # 圈图“逻辑尺寸”（不缩放）
+        cw = circle.width()  / (dpr or 1.0)
+        ch = circle.height() / (dpr or 1.0)
 
-        _draw_to_image(u, circle, cx1, cx2, bounds)
-        _draw_to_image(d, circle, cx1, cx2, bounds)
+        # 以圆心对齐贴图：左上角 = (cx - cw/2, cy - ch/2)
+        x = _round_half_up(cx - cw * 0.5)
+        y = _round_half_up(cy - ch * 0.5)
+
+        _draw_to_image(u, circle, int(x), int(y), bounds)
+        _draw_to_image(d, circle, int(x), int(y), bounds)
+
     return u, d
+
 
 def _compose_four_grid(up_img: QImage, down_img: QImage, overlay_up:QImage, overlay_down: QImage, margin: int = 40, gap: int = 24)-> QImage:
     w, h = up_img.width(), up_img.height()

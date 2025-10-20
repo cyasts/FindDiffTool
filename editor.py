@@ -21,24 +21,6 @@ def clamp_level(level: int) -> int:
         lvl = 1
     return 1 if lvl < 1 else (n if lvl > n else lvl)
 
-def clamp_level_for_rect(level: int, w: float, h: float) -> int:
-    """
-    在 clamp_level 的基础上，再根据当前矩形大小把 level 降级到“能放得下”的最大档。
-    """
-    lvl = clamp_level(level)
-    inner_limit = max(0.0, min(w, h) * 0.5)
-    while lvl > 1 and RADIUS_LEVELS[lvl - 1] > inner_limit:
-        lvl -= 1
-    return lvl
-
-def clamp_circle_center_local(cx_local: float, cy_local: float, w: float, h: float, level: int) -> Tuple[float, float]:
-    """把局部圆心夹到 [radius, w-radius] / [radius, h-radius]。"""
-    lvl = clamp_level(level)
-    radius = float(RADIUS_LEVELS[lvl - 1])
-    cx = max(radius, min(cx_local, max(radius, w - radius)))
-    cy = max(radius, min(cy_local, max(radius, h - radius)))
-    return cx, cy
-
 class DifferenceEditorWindow(QtWidgets.QMainWindow):
     def _set_completed_ui_disabled(self, disabled: bool):
         # 禁用保存、AI处理按钮
@@ -54,6 +36,7 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
         self.setWindowTitle(f"不同点编辑器 - {self.pair.name}")
         self.resize(1600, 1080)
         self._add_btns = list()
+        self.setAttribute(QtCore.Qt.WA_DeleteOnClose, True)
 
         # load images
         self.up_pix = QtGui.QPixmap(self.pair.image_path)
@@ -81,7 +64,7 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
         self.down_view = ImageView(self.down_scene)
 
         self.toggle_click_region = QtWidgets.QCheckBox("显示点击区域")
-        self.toggle_click_region.setChecked(True)
+        self.toggle_click_region.setChecked(False)
         self.toggle_regions = QtWidgets.QCheckBox("显示茬图区域")
         self.toggle_regions.setChecked(True)
         self.toggle_hints = QtWidgets.QCheckBox("显示绿圈")
@@ -124,10 +107,17 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
         self.btn_save = QtWidgets.QPushButton("保存")
         self.btn_submit = QtWidgets.QPushButton("AI处理")
         self.btn_close = QtWidgets.QPushButton("关闭")
+
+        self.btn_gen_click_region = QtWidgets.QPushButton("生成点击区域")
+        self.btn_regen_circle = QtWidgets.QPushButton("重贴绿圈")
+
         bottom_layout.addWidget(self.total_count)
         bottom_layout.addWidget(self.btn_save)
         bottom_layout.addWidget(self.btn_submit)
         bottom_layout.addWidget(self.btn_close)
+        bottom_layout.addStretch(1)
+        bottom_layout.addWidget(self.btn_gen_click_region)
+        bottom_layout.addWidget(self.btn_regen_circle)
         bottom_layout.addStretch(1)
         bottom_layout.addWidget(self.toggle_click_region)
         bottom_layout.addWidget(self.toggle_regions)
@@ -137,7 +127,7 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
         vbox_root.addWidget(bottom, 0)
 
         # Ensure vertical centering of buttons and controls
-        for w in [self.total_count, self.btn_save, self.btn_submit, self.btn_close,
+        for w in [self.total_count, self.btn_save, self.btn_submit, self.btn_close,self.btn_regen_circle,
                   self.toggle_click_region, self.toggle_regions, self.toggle_hints, self.toggle_labels, self.toggle_ai_preview]:
             bottom_layout.setAlignment(w, QtCore.Qt.AlignVCenter)
 
@@ -177,12 +167,16 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
         self.status: str = 'unsaved'
         # dirty state for title asterisk
         self._is_dirty: bool = False
-        self._selected_diff_id = ""
+        self._selected_diff_id: Optional[str] = None
 
         # wire
         self.btn_save.clicked.connect(self.on_save_clicked)
         self.btn_submit.clicked.connect(self.on_ai_process)
         self.btn_close.clicked.connect(self.close)
+
+        self.btn_gen_click_region.clicked.connect(self.on_generate_click_regions)
+        self.btn_regen_circle.clicked.connect(self.on_regen_circles)
+
         self.toggle_click_region.toggled.connect(self.refresh_visibility)
         self.toggle_regions.toggled.connect(self.refresh_visibility)
         self.toggle_hints.toggled.connect(self.refresh_visibility)
@@ -193,6 +187,8 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
         self.btn_save.setStyleSheet("QPushButton{background:#0d6efd;color:#fff;padding:6px 14px;border-radius:6px;border:1px solid #0d6efd;} QPushButton:hover{background:#0b5ed7;border-color:#0b5ed7;}")
         self.btn_submit.setStyleSheet("QPushButton{background:#28a745;color:#fff;padding:6px 14px;border-radius:6px;border:1px solid #28a745;} QPushButton:hover{background:#1e7e34;border-color:#1e7e34;}")
         self.btn_close.setStyleSheet("QPushButton{background:#6c757d;color:#fff;padding:6px 14px;border-radius:6px;border:1px solid #6c757d;} QPushButton:hover{background:#545b62;border-color:#545b62;}")
+        self.btn_gen_click_region.setStyleSheet("QPushButton{background:#17a2b8;color:#fff;padding:6px 14px;border-radius:6px;border:1px solid #17a2b8;} QPushButton:hover{background:#138496;border-color:#138496;}")
+        self.btn_regen_circle.setStyleSheet("QPushButton{background:#17a2b8;color:#fff;padding:6px 14px;border-radius:6px;border:1px solid #17a2b8;} QPushButton:hover{background:#138496;border-color:#138496;}")
         self.total_count.setStyleSheet("color:#333;font-weight:500;")
 
         # initialize scenes/view
@@ -398,8 +394,8 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
             y=rect.y(),
             width=rect.width(),
             height=rect.height(),
-            cx = rect.width() / 2,
-            cy = rect.height() / 2,
+            cx=rect.center().x(),
+            cy=rect.center().y(),
             hint_level=1,
             click_customized=False,
             ccx=rect.center().x(),
@@ -426,7 +422,6 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
         self.down_scene.addItem(item_down)
         self.rect_items_up[diff.id] = item_up
         self.rect_items_down[diff.id] = item_down
-        item_up.radiusChanged.connect(self._update_radius_value_for_label)
         self.refresh_visibility()
 
     def rebuild_lists(self) -> None:
@@ -444,7 +439,7 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
                 lw.clear()
 
             # === 列宽配置 ===
-            COL_FIXED = {0: 18, 1: 40, 3: 50, 4: 18, 5: 15}
+            COL_FIXED = {0: 18, 1: 40, 3: 64, 4: 18, 5: 15}
             EDIT_MIN = 100
             HSP = 6
             MARG = (6, 4, 6, 4)
@@ -477,15 +472,21 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
                 visibled.setChecked(diff.visible)
                 visibled.stateChanged.connect(lambda _state, _id=diff.id: self.on_visibled_toggled(_id))
 
-                radius_label = QtWidgets.QLabel()
-                radius_label.setObjectName(f"radius_{diff.id}")
-                radius_label.setStyleSheet("color:#666;font-size:11px;")
-                if not hasattr(self, 'radius_labels'):
-                    self.radius_labels = {}
-                self.radius_labels[diff.id] = radius_label
+                level_combo = QtWidgets.QComboBox()
+                level_combo.setObjectName(f"level_{diff.id}")
+                # 填入 1..len(RADIUS_LEVELS)
+                for i in range(1, len(RADIUS_LEVELS) + 1):
+                    level_combo.addItem(str(i), i)
+                # 初始选中
                 safe_level = clamp_level(diff.hint_level)
-                radius = RADIUS_LEVELS[safe_level - 1]
-                self._update_radius_value_for_label(diff.id, radius)
+                level_combo.setCurrentIndex(safe_level - 1)
+                # 联动：索引变 -> 级别 = index+1
+                level_combo.currentIndexChanged.connect(
+                    lambda idx, _id=diff.id: self.on_level_changed(_id, idx + 1)
+                )
+                # 简单样式（可要可不要）
+                level_combo.setFixedWidth(64)
+                level_combo.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Fixed)
 
                 btn_delete = QtWidgets.QToolButton()
                 btn_delete.setToolTip("删除该茬点")
@@ -503,13 +504,13 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
                 btn_delete.clicked.connect(lambda _=False, _id=diff.id: self.delete_diff_by_id(_id))
 
                 # ---- 尺寸策略 ----
-                for wid in (visibled, enabled, btn_delete, title, radius_label):
+                for wid in (visibled, enabled, btn_delete, title, level_combo):
                     wid.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Fixed)
                 edit.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
 
                 visibled.setFixedWidth(COL_FIXED[0])
                 title.setFixedWidth(COL_FIXED[1])
-                radius_label.setFixedWidth(COL_FIXED[3])
+                level_combo.setFixedWidth(COL_FIXED[3])
                 enabled.setFixedWidth(COL_FIXED[4])
                 btn_delete.setFixedWidth(COL_FIXED[5])
 
@@ -522,7 +523,7 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
                 gl.addWidget(visibled,     0, 0)
                 gl.addWidget(title,        0, 1)
                 gl.addWidget(edit,         0, 2)
-                gl.addWidget(radius_label, 0, 3)
+                gl.addWidget(level_combo, 0, 3)
                 gl.addWidget(enabled,      0, 4)
                 gl.addWidget(btn_delete,   0, 5)
 
@@ -550,6 +551,8 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
         # 如需恢复到之前的选中，放在解除屏蔽之后执行（可选）
         if self._selected_diff_id is not None:
             self._set_selected_diff(self._selected_diff_id)
+
+        self._update_ordinals()
 
 
     def _update_radius_value_for_label(self, diffid: str, r: float) -> None:
@@ -663,7 +666,7 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
         self.rebuild_lists()
         self._make_dirty()
         if self._selected_diff_id == diff_id:
-            self._set_selected_diff("")
+            self._set_selected_diff(None)
 
     def _set_selected_diff(self, diff_id: Optional[str]) -> None:
         """按照 diff.section 只在对应区域选中，并同步对应场景的高亮。
@@ -795,13 +798,10 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
         circles = []
         for d in self.differences:
             r_w, r_h = d.width, d.height
-            cx_local = d.cx if d.cx >= 0 else r_w / 2.0
-            cy_local = d.cy if d.cy >= 0 else r_h / 2.0
-            lvl = clamp_level_for_rect(d.hint_level, r_w, r_h)
+            cx_abs = d.cx if d.cx >= 0 else r_w / 2.0
+            cy_abs = d.cy if d.cy >= 0 else r_h / 2.0
+            lvl = d.hint_level
             radius_px = float(RADIUS_LEVELS[lvl - 1])
-            # absolute center in natural coordinates
-            cx_abs = d.x + cx_local
-            cy_abs = d.y + cy_local
             circles.append((cx_abs, cy_abs, radius_px))
 
         def circle_overlap_ratio(c1, c2) -> float:
@@ -891,6 +891,59 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
         self._ai_thread.finished.connect(self._ai_thread.deleteLater)
         self._ai_thread.start()
 
+    def on_level_changed(self, diff_id: str, new_level: int) -> None:
+        """列表里切换 hint level（1..15）。更新 dataclass，并驱动场景图元重绘。"""
+        diff = next((d for d in self.differences if d.id == diff_id), None)
+        if not diff:
+            return
+        lvl = clamp_level(new_level)
+        if diff.hint_level == lvl:
+            return
+
+        # 1) 写回 dataclass
+        diff.hint_level = lvl
+
+        # 2) 通知两个场景的对应 DifferenceItem 重绘（并尽量发信号以便其刷新边界/shape）
+        for it in (self.rect_items_up.get(diff.id), self.rect_items_down.get(diff.id)):
+            if not it:
+                continue
+            try:
+                # 模型包的是同一个 dataclass，这里为了让视图可靠刷新，显式通知
+                it.model.data.hint_level = lvl
+                it.model.anyChanged.emit(self)   # 触发 _on_model_any_changed -> update()
+            except Exception:
+                it.update()
+
+        # 3) UI 脏
+        self._make_dirty()
+
+    def on_regen_circles(self) -> None:
+        # 重新生成圆形区域（未自定义的）
+        if not self.differences:
+            QtWidgets.QMessageBox.information(self, "提示", "当前没有可用的茬点，请先添加茬点。")
+            return
+        compose_result(self.level_dir(), self.name, self.ext, self.differences)
+        QtWidgets.QMessageBox.information(self, "绿圈贴图", "重新贴图完成")
+
+    def on_generate_click_regions(self) -> None:
+        # 生成点击区域
+        if not self.differences:
+            QtWidgets.QMessageBox.information(self, "提示", "当前没有可用的茬点，请先添加茬点。")
+            return
+
+        # 生成点击区域逻辑
+        for d in self.differences:
+            if not d.click_customized:
+                d.click_customized = True
+                d.ccx = d.x + d.width / 2
+                d.ccy = d.y + d.height / 2
+                d.ca = d.width / 2
+                d.cb = d.height / 2
+                d.cshape = 'rect'
+
+        self.refresh_visibility()
+        self._make_dirty()
+
     def save_config(self) -> None:
 
         self._update_status('saved')
@@ -911,7 +964,6 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
             pass
 
         QtWidgets.QMessageBox.information(self, "成功", f"配置保存成功\n")
-
 
     def _write_config_snapshot(self) -> None:
         """Write current differences to config.json without validation or UI side-effects.
@@ -946,8 +998,8 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
             ]
             # compute hint circle from stored local center and radius
             # local center -> absolute
-            cx = to_percent_x(d.x + d.cx)
-            cy = to_percent_y_bottom(d.y + d.cy)
+            cx = to_percent_x(d.cx)
+            cy = to_percent_y_bottom(d.cy)
             cx = max(0.0, min(1.0, cx))
             cy = max(0.0, min(1.0, cy))
 
@@ -1030,7 +1082,6 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
             self.ai_overlays_up.setVisible(False)
             self.ai_overlays_down.setVisible(False)
             self._is_dirty = False
-            self._update_status('unsaved')
             self._update_window_title()
             return
         try:
@@ -1065,14 +1116,11 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
             c_y = float(diff.get('circleCenter', {}).get('y', -1))
             cpx = from_percent_x(c_x)
             cpy = from_percent_y_bottom(c_y)
-            cx_local = cpx - min_x
-            cy_local = cpy - min_y
             
             w_rect = max(MIN_RECT_SIZE, max_x - min_x)
             h_rect = max(MIN_RECT_SIZE, max_y - min_y)
             raw_level = diff.get('hintLevel', 1)
-            lvl = clamp_level_for_rect(raw_level, w_rect, h_rect)
-            cx_local, cy_local = clamp_circle_center_local(cx_local, cy_local, w_rect, h_rect, lvl)
+            lvl = clamp_level(raw_level)
 
             # 3) 二次点击区域（自定义 vs 回退）
             #    兼容两种判断：显式标记 或 字段存在即视为自定义
@@ -1107,8 +1155,8 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
                 width=max(MIN_RECT_SIZE, max_x - min_x),
                 height=max(MIN_RECT_SIZE, max_y - min_y),
                 hint_level=int(lvl),
-                cx=float(cx_local),
-                cy=float(cy_local),
+                cx=float(cpx),
+                cy=float(cpy),
                 click_customized=use_custom,
                 cshape=shape,
                 ccx=float(ccx_abs),
@@ -1126,9 +1174,17 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
         if self.toggle_ai_preview.isChecked():
             self._refresh_ai_overlays()
 
+    def _update_ordinals(self) -> None:
+        """按 self.differences 当前顺序为每个图元设置 1-based 序号。"""
+        for idx, d in enumerate(self.differences, start=1):
+            it_up   = self.rect_items_up.get(d.id)
+            it_down = self.rect_items_down.get(d.id)
+            if it_up:   it_up.setOrdinal(idx)
+            if it_down: it_down.setOrdinal(idx)
+
     def closeEvent(self, event: QtGui.QCloseEvent) -> None:
         # 未保存时提示
-        if getattr(self, '_is_dirty', False) or self.status == 'unsaved':
+        if getattr(self, '_is_dirty', False):
             ret = QtWidgets.QMessageBox.question(
                 self,
                 "未保存",

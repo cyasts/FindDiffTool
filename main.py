@@ -5,7 +5,7 @@ from typing import List, Optional
 
 from PySide6 import QtCore, QtGui, QtWidgets
 from editor import DifferenceEditorWindow
-
+from circle_provider import CirclePixmapProvider
 
 IMAGE_EXTENSIONS = {'.png', '.jpg', '.jpeg', '.bmp', '.gif'}
 
@@ -342,6 +342,7 @@ def main() -> int:
     app.setOrganizationName("FindDifferenceEditor")
     app.setApplicationName("PySideApp")
     w = MainWindow()
+    CirclePixmapProvider.instance().preload_base()
     w.show()
     return app.exec()
 
