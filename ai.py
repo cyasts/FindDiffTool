@@ -8,6 +8,7 @@ from utils import quantize_roi
 BASE_URL = "https://ai.t8star.cn/"
 BASE_URL_HK = "https://hk-api.gptbest.vip"
 BASE_URL_AM = "https://api.gptbest.vip"
+BASE_URL_AK = "http://104.194.8.112:9088"
 
 class ImageEditRequester:
     def __init__(self, image_path: str, image_bytes: bytes, mask_bytes:bytes, prompt: str):
@@ -15,7 +16,7 @@ class ImageEditRequester:
         self.image_bytes = image_bytes
         self.mask_bytes = mask_bytes
         self.prompt = prompt
-        self.BASE_URL = BASE_URL_HK
+        self.BASE_URL = BASE_URL_AM
         # 建议在系统环境变量中设置 BANANA_API_KEY，避免把密钥写入代码库
         self.API_KEY = "sk-RX5FUdtuNTfQvr3LAOsDsL7OdkJZxf7DIhQ73Gfqj7yq50ZO"
         self.MODEL = "nano-banana"
