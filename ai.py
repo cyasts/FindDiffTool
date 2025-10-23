@@ -168,12 +168,20 @@ class AIWorker(QtCore.QObject):
     finished = QtCore.Signal(list)        # failed indices
     error = QtCore.Signal(str)
 
-    def __init__(self, level_dir: str, name: str, ext: str, differences: List[Difference], target_indices: List[int]):
+    def __init__(self, level_dir: str, name: str, ext: str, differences: List[Difference], target_indices: List[int], api: str):
         super().__init__()
         self.level_dir = level_dir
         self.name = name
         self.differences = differences
         self.target_indices = target_indices
+        if (api == "A81"):
+            self.BASE_URL = BASE_URL
+        elif (api == "HK"):
+            self.BASE_URL = BASE_URL_HK
+        elif (api == "US"):
+            self.BASE_URL = BASE_URL_AM
+        elif (api == "A82"):
+            self.BASE_URL = BASE_URL_AK
         self.ext = ext
         self.origin_path = os.path.join(level_dir, f"{self.name}_origin{self.ext}")
 

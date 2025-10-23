@@ -111,10 +111,19 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
         self.btn_gen_click_region = QtWidgets.QPushButton("生成点击区域")
         self.btn_regen_circle = QtWidgets.QPushButton("重贴绿圈")
 
+        self.api_combo = QtWidgets.QComboBox()
+        self.api_combo.addItem("A81", "A81")
+        self.api_combo.addItem("A82", "A82")
+        self.api_combo.addItem("香港", "HK")
+        self.api_combo.addItem("美国", "US")
+        self.api_combo.setCurrentIndex(0)
+
         bottom_layout.addWidget(self.total_count)
         bottom_layout.addWidget(self.btn_save)
-        bottom_layout.addWidget(self.btn_submit)
         bottom_layout.addWidget(self.btn_close)
+        bottom_layout.addStretch(1)
+        bottom_layout.addWidget(self.api_combo)
+        bottom_layout.addWidget(self.btn_submit)
         bottom_layout.addStretch(1)
         bottom_layout.addWidget(self.btn_gen_click_region)
         bottom_layout.addWidget(self.btn_regen_circle)
@@ -127,7 +136,7 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
         vbox_root.addWidget(bottom, 0)
 
         # Ensure vertical centering of buttons and controls
-        for w in [self.total_count, self.btn_save, self.btn_submit, self.btn_close,self.btn_regen_circle,
+        for w in [self.total_count, self.btn_save, self.api_combo,self.btn_submit, self.btn_close,self.btn_regen_circle,
                   self.toggle_click_region, self.toggle_regions, self.toggle_hints, self.toggle_labels, self.toggle_ai_preview]:
             bottom_layout.setAlignment(w, QtCore.Qt.AlignVCenter)
 
@@ -874,14 +883,13 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
         # 准备 origin 路径
         level_dir = self.level_dir()
 
-        origin = self.pair.image_path
-
         # 状态栏进度
         self._ai_progress_start(len(targets))
 
         # 后台线程
         self._ai_thread = QtCore.QThread(self)
-        self._ai_worker = AIWorker(level_dir, self.name, self.ext, self.differences, targets)
+        api = self.api_combo.currentData()
+        self._ai_worker = AIWorker(level_dir, self.name, self.ext, self.differences, targets, api)
         self._ai_worker.moveToThread(self._ai_thread)
         self._ai_thread.started.connect(self._ai_worker.run)
         # Ensure slots execute on GUI thread
