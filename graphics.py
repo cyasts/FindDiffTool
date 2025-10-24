@@ -48,6 +48,8 @@ class DifferenceModel(QtCore.QObject):
     def label(self):       return self.data.label
     @property
     def category(self):    return self.data.category
+    @property
+    def enabled(self):     return bool(self.data.enabled)
     # ------- 点击区域（补充） -------
     @property
     def click_customized(self): return bool(self.data.click_customized)
@@ -233,10 +235,9 @@ class DifferenceItem(QtWidgets.QGraphicsObject):
             max(MIN_RECT_SIZE, float(self.model.width)),
             max(MIN_RECT_SIZE, float(self.model.height))
         )
-
+        self._apply_enabled_flags()   # ★ 新增：同步拖动/拉伸开关
         # 性能/Flags
         self.setCacheMode(QtWidgets.QGraphicsItem.NoCache)
-        self.setFlag(QtWidgets.QGraphicsItem.ItemIsMovable, True)              # 使用内置拖动
         self.setFlag(QtWidgets.QGraphicsItem.ItemSendsGeometryChanges, True)   # 以便截获移动
         self.setAcceptedMouseButtons(QtCore.Qt.LeftButton)
         self.setAcceptHoverEvents(True)
@@ -285,6 +286,17 @@ class DifferenceItem(QtWidgets.QGraphicsObject):
         cx_local = cx_scene - self.model.x
         cy_local = cy_scene - self.model.y
         return QtCore.QPointF(cx_local, cy_local), r
+
+        # 仅当 enabled 为 True 才允许矩形交互（移动/拉伸）
+    def _rect_interactions_allowed(self) -> bool:
+        return bool(self.model.enabled)
+
+    def _apply_enabled_flags(self):
+        movable = self._rect_interactions_allowed()
+        self.setFlag(QtWidgets.QGraphicsItem.ItemIsMovable, movable)
+        # （可选）禁用时降低红框高亮感
+        if not movable:
+            self._hl_rect = False
 
     def _current_click_local(self) -> Tuple[QtCore.QPointF, float, float, str]:
         """
@@ -625,7 +637,7 @@ class DifferenceItem(QtWidgets.QGraphicsObject):
         rect = self._current_rect_local()
 
         # 点击区域手柄优先
-        if self._show_click:
+        if self._rect_interactions_allowed() and self._show_click:
             hcode = self._hit_click_handle(pos)
             if hcode:
                 if hcode in ("L","R"): self.setCursor(QtCore.Qt.SizeHorCursor)
@@ -647,7 +659,7 @@ class DifferenceItem(QtWidgets.QGraphicsObject):
         
         # 矩形
         # 角优先
-        if self._show_rect:
+        if self._rect_interactions_allowed() and self._show_rect:
             corner = self._hit_corner(rect, pos)
             if corner >= 0:
                 self.setCursor(QtCore.Qt.SizeFDiagCursor if corner in (0, 2) else QtCore.Qt.SizeBDiagCursor)
@@ -663,13 +675,13 @@ class DifferenceItem(QtWidgets.QGraphicsObject):
 
         
 
-        # 矩形内部也高亮
-        if self._show_rect and rect.contains(pos):
-            self.setCursor(QtCore.Qt.OpenHandCursor)
-            self._set_hover_state(rect_hl=True, circ_hl=False, click_hl=False)
-            return
+            # 矩形内部也高亮
+            if self._show_rect and rect.contains(pos):
+                self.setCursor(QtCore.Qt.OpenHandCursor)
+                self._set_hover_state(rect_hl=True, circ_hl=False, click_hl=False)
+                return
 
-        self.setCursor(QtCore.Qt.OpenHandCursor)
+        # self.setCursor(QtCore.Qt.OpenHandCursor)
         self._set_hover_state(rect_hl=False, circ_hl=False, click_hl=False)
         super().hoverMoveEvent(e)
 
@@ -722,45 +734,46 @@ class DifferenceItem(QtWidgets.QGraphicsObject):
             center, _ = self._current_circle_local()
             self._press_center = QtCore.QPointF(center)
             e.accept(); return
+        
+        if self._rect_interactions_allowed():
+            # 角
+            corner = self._hit_corner(rect, e.pos())
+            if corner >= 0:
+                self._mode = self.Mode.RESIZE_CORNER
+                self._drag_corner = corner
+                # 记录按下时 TL/BR（场景）
+                tl_scene = self.mapToScene(rect.topLeft())
+                br_scene = self.mapToScene(rect.bottomRight())
+                self._press_tl_scene = tl_scene
+                self._press_br_scene = br_scene
+                # 对角锚点
+                opp = [QtCore.QPointF(br_scene.x(), br_scene.y()),
+                    QtCore.QPointF(tl_scene.x(), br_scene.y()),
+                    QtCore.QPointF(tl_scene.x(), tl_scene.y()),
+                    QtCore.QPointF(br_scene.x(), tl_scene.y())]
+                self._anchor_scene = opp[corner]
+                self._is_resizing = True
+                e.accept(); return
 
-        # 角
-        corner = self._hit_corner(rect, e.pos())
-        if corner >= 0:
-            self._mode = self.Mode.RESIZE_CORNER
-            self._drag_corner = corner
-            # 记录按下时 TL/BR（场景）
-            tl_scene = self.mapToScene(rect.topLeft())
-            br_scene = self.mapToScene(rect.bottomRight())
-            self._press_tl_scene = tl_scene
-            self._press_br_scene = br_scene
-            # 对角锚点
-            opp = [QtCore.QPointF(br_scene.x(), br_scene.y()),
-                   QtCore.QPointF(tl_scene.x(), br_scene.y()),
-                   QtCore.QPointF(tl_scene.x(), tl_scene.y()),
-                   QtCore.QPointF(br_scene.x(), tl_scene.y())]
-            self._anchor_scene = opp[corner]
-            self._is_resizing = True
-            self.setFlag(QtWidgets.QGraphicsItem.ItemIsMovable, False)
+            # 边
+            edge = self._hit_edge(rect, e.pos())
+            if edge:
+                self._mode = self.Mode.RESIZE_EDGE
+                self._edge_code = edge
+                tl_scene = self.mapToScene(rect.topLeft())
+                br_scene = self.mapToScene(rect.bottomRight())
+                self._press_tl_scene = tl_scene
+                self._press_br_scene = br_scene
+                self._is_resizing = True
+                e.accept(); return
+
+            # 默认移动（交给内置拖动）
+            self._mode = self.Mode.MOVE
+            self.setCursor(QtCore.Qt.ClosedHandCursor)
+            super().mousePressEvent(e)
             e.accept(); return
 
-        # 边
-        edge = self._hit_edge(rect, e.pos())
-        if edge:
-            self._mode = self.Mode.RESIZE_EDGE
-            self._edge_code = edge
-            tl_scene = self.mapToScene(rect.topLeft())
-            br_scene = self.mapToScene(rect.bottomRight())
-            self._press_tl_scene = tl_scene
-            self._press_br_scene = br_scene
-            self._is_resizing = True
-            self.setFlag(QtWidgets.QGraphicsItem.ItemIsMovable, False)
-            e.accept(); return
-
-        # 默认移动（交给内置拖动）
-        self._mode = self.Mode.MOVE
-        self.setCursor(QtCore.Qt.ClosedHandCursor)
-        super().mousePressEvent(e)
-        e.accept()
+        e.ignore()
 
     def mouseMoveEvent(self, e: QtWidgets.QGraphicsSceneMouseEvent):
         if self._mode == self.Mode.MOVE:
@@ -901,7 +914,7 @@ class DifferenceItem(QtWidgets.QGraphicsObject):
     def mouseReleaseEvent(self, e: QtWidgets.QGraphicsSceneMouseEvent):
         self._mode = self.Mode.NONE
         self._is_resizing = False
-        self.setFlag(QtWidgets.QGraphicsItem.ItemIsMovable, True)
+        self.updateEnabledFlags()
         self.setCursor(QtCore.Qt.OpenHandCursor)
         if callable(self._on_change):
             try:
@@ -964,6 +977,8 @@ class DifferenceItem(QtWidgets.QGraphicsObject):
     # -------------------- itemChange：移动夹紧并写回 model --------------------
     def itemChange(self, change, value):
         if change == QtWidgets.QGraphicsItem.ItemPositionChange and self.scene():
+            if not self._rect_interactions_allowed():
+                return QtCore.QPointF(self.pos())
             # 夹到场景
             new_pos: QtCore.QPointF = value
             rect = self._current_rect_local()
@@ -974,8 +989,9 @@ class DifferenceItem(QtWidgets.QGraphicsObject):
 
         if change == QtWidgets.QGraphicsItem.ItemPositionHasChanged:
             # 把移动写回 model（尺寸不变）
-            rect = self._current_rect_local()
-            self.model.set_rect(self.pos().x(), self.pos().y(), rect.width(), rect.height(), source=self)
+            if self._rect_interactions_allowed():
+                rect = self._current_rect_local()
+                self.model.set_rect(self.pos().x(), self.pos().y(), rect.width(), rect.height(), source=self)
             return super().itemChange(change, value)
         return super().itemChange(change, value)
 
@@ -1002,6 +1018,7 @@ class DifferenceItem(QtWidgets.QGraphicsObject):
     @QtCore.Slot(object)
     def _on_model_any_changed(self, source):
         self._text_cache_key = None
+        self._apply_enabled_flags()   # ★ 新增：同步拖动/拉伸开关
         self._refresh_bounds_if_needed()
         self.update()
 
@@ -1170,6 +1187,10 @@ class DifferenceItem(QtWidgets.QGraphicsObject):
     def updateLabel(self):
         # 现用现取 model.label，仅需清缓存
         self._text_cache_key = None
+        self.update()
+
+    def updateEnabledFlags(self):
+        self._apply_enabled_flags()
         self.update()
 
     def setVis(self, show_click: bool, show_rect: bool, show_circle: bool, show_label: bool):

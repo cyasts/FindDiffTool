@@ -326,6 +326,7 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
         for d in self.differences:
             d.enabled = False
         self.rebuild_lists()
+        self.refresh_visibility()
         self.update_total_count()
 
         compose_result(self.level_dir(), self.name, self.ext, self.differences)
@@ -390,7 +391,9 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
         r = scene.sceneRect()
         size = min(r.width(), r.height()) * 0.2
         size = max(MIN_RECT_SIZE, size)
-        rect = QtCore.QRectF(r.center().x() - size / 2, r.center().y() - size / 2, size, size)
+        margin = max(6.0, size * 0.05)  # 给一点内边距，手感更好
+
+        rect = QtCore.QRectF(r.left() + margin, r.bottom() - margin - size, size, size)
         diff = Difference(
             id=now_id(),
             name=f"不同点 {len(self.differences) + 1}",
@@ -614,8 +617,15 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
         if not diff:
             return
         diff.enabled = not diff.enabled
+        u = self.rect_items_up.get(diff.id)
+        d = self.rect_items_down.get(diff.id)
+        if u:
+            u.updateEnabledFlags()
+        if d:
+            d.updateEnabledFlags()
         self._make_dirty()
         self.update_total_count()
+        self.refresh_visibility()
 
     def delete_diff_by_id(self, diff_id: str) -> None:
         idx = next((i for i, d in enumerate(self.differences) if d.id == diff_id), -1)
@@ -752,6 +762,7 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
         for d in (self.rect_items_up, self.rect_items_down):
             for item in d.values():
                 item.setVis(show_click_region, show_regions, show_hints, show_labels)
+                item.updateEnabledFlags()
 
     # === AI 预览覆盖 ===
     def on_toggle_ai_preview(self) -> None:
