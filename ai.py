@@ -11,19 +11,26 @@ BASE_URL_AM = "https://api.gptbest.vip"
 BASE_URL_AK = "http://104.194.8.112:9088"
 
 class ImageEditRequester:
-    def __init__(self, image_path: str, image_bytes: bytes, mask_bytes:bytes, prompt: str):
+    def __init__(self, image_path: str, image_bytes: bytes, mask_bytes:bytes, prompt: str, api: str):
         self.image_path = image_path
         self.image_bytes = image_bytes
         self.mask_bytes = mask_bytes
         self.prompt = prompt
-        self.BASE_URL = BASE_URL_AM
         # 建议在系统环境变量中设置 BANANA_API_KEY，避免把密钥写入代码库
         self.API_KEY = "sk-RX5FUdtuNTfQvr3LAOsDsL7OdkJZxf7DIhQ73Gfqj7yq50ZO"
         self.MODEL = "nano-banana"
-        self.url = f"{self.BASE_URL}/v1/images/edits"
+        if (api == "A81"):
+            self.BASE_URL = BASE_URL
+        elif (api == "HK"):
+            self.BASE_URL = BASE_URL_HK
+        elif (api == "US"):
+            self.BASE_URL = BASE_URL_AM
+        elif (api == "A82"):
+            self.BASE_URL = BASE_URL_AK
         self.headers = {
             'Authorization': f'Bearer {self.API_KEY}'
         }
+        self.url = f"{self.BASE_URL}/v1/images/edits"
 
     def send_request(self) -> bytes:
         # 记录原始图片尺寸
@@ -51,6 +58,7 @@ class ImageEditRequester:
             # 'aspect_ratio': '4:3',
             'size': f"{CANVAS_W}x{CANVAS_H}",
         }
+        print("url:", self.url)
         response = requests.request("POST", self.url, headers=self.headers, data=payload, files=files)
 
         try:
@@ -174,14 +182,7 @@ class AIWorker(QtCore.QObject):
         self.name = name
         self.differences = differences
         self.target_indices = target_indices
-        if (api == "A81"):
-            self.BASE_URL = BASE_URL
-        elif (api == "HK"):
-            self.BASE_URL = BASE_URL_HK
-        elif (api == "US"):
-            self.BASE_URL = BASE_URL_AM
-        elif (api == "A82"):
-            self.BASE_URL = BASE_URL_AK
+        self.api = api
         self.ext = ext
         self.origin_path = os.path.join(level_dir, f"{self.name}_origin{self.ext}")
 
@@ -230,7 +231,7 @@ class AIWorker(QtCore.QObject):
                 # QtGui.QImage.fromData(png_bytes).save(os.path.join(self.level_dir, "dbg_input.png"))
                 # QtGui.QImage.fromData(mask_bytes).save(os.path.join(self.level_dir, "dbg_mask.png"))
 
-                req = ImageEditRequester("input", png_bytes, mask_bytes, d.label)
+                req = ImageEditRequester("input", png_bytes, mask_bytes, d.label, self.api)
                 # 获取 AI 返回的图像字节
                 img_bytes = req.send_request()
                 patch = QtGui.QImage.fromData(img_bytes).copy(ox, oy, w, h)
