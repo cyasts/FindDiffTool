@@ -118,10 +118,17 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
         self.api_combo.addItem("美国", "US")
         self.api_combo.setCurrentIndex(0)
 
+        self.client_combo = QtWidgets.QComboBox()
+        self.client_combo.addItem("A8", "A8")
+        self.client_combo.addItem("Gemini", "Gemini")
+        self.client_combo.setCurrentIndex(0)
+        self.client_combo.currentIndexChanged.connect(self.on_client_changed)
+
         bottom_layout.addWidget(self.total_count)
         bottom_layout.addWidget(self.btn_save)
         bottom_layout.addWidget(self.btn_close)
         bottom_layout.addStretch(1)
+        bottom_layout.addWidget(self.client_combo)
         bottom_layout.addWidget(self.api_combo)
         bottom_layout.addWidget(self.btn_submit)
         bottom_layout.addStretch(1)
@@ -136,7 +143,7 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
         vbox_root.addWidget(bottom, 0)
 
         # Ensure vertical centering of buttons and controls
-        for w in [self.total_count, self.btn_save, self.api_combo,self.btn_submit, self.btn_close,self.btn_regen_circle,
+        for w in [self.total_count, self.btn_save, self.client_combo, self.api_combo, self.btn_submit, self.btn_close, self.btn_regen_circle,
                   self.toggle_click_region, self.toggle_regions, self.toggle_hints, self.toggle_labels, self.toggle_ai_preview]:
             bottom_layout.setAlignment(w, QtCore.Qt.AlignVCenter)
 
@@ -248,6 +255,15 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
             self.btn_submit.setEnabled(count > 0)
         except Exception:
             pass
+
+    def on_client_changed(self, index: int) -> None:
+        client = self.client_combo.itemData(index)
+        if client == "Gemini":
+            # Gemini 不支持 AI 预览
+            self.api_combo.setEnabled(False)
+        else:
+            self.api_combo.setEnabled(True)
+
     # --- AI status bar progress helpers ---
     def _ai_progress_start(self, total: int) -> None:
         frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
@@ -899,8 +915,10 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
 
         # 后台线程
         self._ai_thread = QtCore.QThread(self)
+        client = self.client_combo.currentData()
+        self._ai_worker = AIWorker(level_dir, self.name, self.ext, self.differences, targets)
         api = self.api_combo.currentData()
-        self._ai_worker = AIWorker(level_dir, self.name, self.ext, self.differences, targets, api)
+        self._ai_worker.setClient(client, api)
         self._ai_worker.moveToThread(self._ai_thread)
         self._ai_thread.started.connect(self._ai_worker.run)
         # Ensure slots execute on GUI thread

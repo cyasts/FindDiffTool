@@ -1,101 +1,11 @@
-import os, requests, base64, io
+import os
 from typing import List
 from PySide6 import QtCore, QtGui
 
 from models import Difference, CANVAS_W, CANVAS_H
 from utils import quantize_roi
 
-BASE_URL = "https://ai.t8star.cn/"
-BASE_URL_HK = "https://hk-api.gptbest.vip"
-BASE_URL_AM = "https://api.gptbest.vip"
-BASE_URL_AK = "http://104.194.8.112:9088"
-
-class ImageEditRequester:
-    def __init__(self, image_path: str, image_bytes: bytes, mask_bytes:bytes, prompt: str, api: str):
-        self.image_path = image_path
-        self.image_bytes = image_bytes
-        self.mask_bytes = mask_bytes
-        self.prompt = prompt
-        # 建议在系统环境变量中设置 BANANA_API_KEY，避免把密钥写入代码库
-        self.API_KEY = "sk-RX5FUdtuNTfQvr3LAOsDsL7OdkJZxf7DIhQ73Gfqj7yq50ZO"
-        self.MODEL = "nano-banana"
-        if (api == "A81"):
-            self.BASE_URL = BASE_URL
-        elif (api == "HK"):
-            self.BASE_URL = BASE_URL_HK
-        elif (api == "US"):
-            self.BASE_URL = BASE_URL_AM
-        elif (api == "A82"):
-            self.BASE_URL = BASE_URL_AK
-        self.headers = {
-            'Authorization': f'Bearer {self.API_KEY}'
-        }
-        self.url = f"{self.BASE_URL}/v1/images/edits"
-
-    def send_request(self) -> bytes:
-        # 记录原始图片尺寸
-        files = [
-            ('image', ('input.png', io.BytesIO(self.image_bytes), 'image/png')),
-            ('mask', ('mask.png', io.BytesIO(self.mask_bytes), "image/png")),
-        ]
-        prop = (
-            "任务设定：我从一张大图裁出 ROI 放到固定画布中央；"
-            "画布的非编辑区已是纯白(255,255,255,255)。\n"
-            "遮罩规范（务必遵守）：\n"
-            "• mask 仅用作选择：透明像素=允许编辑；不透明像素=禁止编辑；不得对 mask 本身做任何绘制或改动。\n"
-            "• 只在『image』图像中与 mask 透明区域对应的像素内进行修改；"
-            "严禁改变位置/大小/边界对齐；禁止外扩或羽化边缘。\n"
-            "• 非编辑区必须与输入像素完全一致（保持纯白 255,255,255,255），"
-            "不得新增阴影/纹理/噪声/描边。\n"
-            "• 保持几何与透视不变，仅做必要内容替换或修饰，尽量保持原有结构线条。\n"
-            "输出要求：返回整张 PNG；非编辑区需为不透明白色(Alpha=255)；禁止透明背景与棋盘格效果。\n"
-            f"任务内容：{self.prompt}"
-        )
-        payload = {
-            'model': self.MODEL,
-            'prompt': prop,
-            'response_format': 'b64_json',
-            # 'aspect_ratio': '4:3',
-            'size': f"{CANVAS_W}x{CANVAS_H}",
-        }
-        print("url:", self.url)
-        response = requests.request("POST", self.url, headers=self.headers, data=payload, files=files)
-
-        try:
-            resp_json = response.json()
-        except Exception:
-            raise RuntimeError(f"AI返回非JSON: {response.text[:200]}")
-
-        if 'data' not in resp_json or not resp_json['data']:
-            raise RuntimeError("AI返回数据为空")
-
-        data0 = resp_json['data'][0]
-        b64img = data0.get('b64_json')
-        if b64img:
-            # 兼容 data url 前缀
-            if b64img.startswith('data:image'):
-                b64img = b64img.split(',', 1)[-1]
-            b64img = ''.join(b64img.split())
-            # 修复base64 padding
-            missing_padding = len(b64img) % 4
-            if missing_padding:
-                b64img += '=' * (4 - missing_padding)
-            img_bytes = base64.b64decode(b64img)
-
-        elif 'url' in data0:
-            img_url = data0['url']
-            img_resp = requests.get(img_url)
-            img_bytes = img_resp.content
-        else:
-            raise RuntimeError("AI未返回b64或url")
-
-        return img_bytes
-        # # 保证输出尺寸一致
-        # with Image.open(out_path) as out_img:
-        #     if out_img.size != (width, height):
-        #         out_img = out_img.resize((width, height), Image.LANCZOS)
-        #         out_img.save(out_path)
-
+from ai_client import A81ImageEditClient, GeminiImageEditClient
 
 def _make_rect_feather_alpha8(w: int, h: int, f: int) -> QtGui.QImage:
     """生成矩形四周羽化的 Alpha8 掩膜，中心=255，边缘渐变到0"""
@@ -176,15 +86,20 @@ class AIWorker(QtCore.QObject):
     finished = QtCore.Signal(list)        # failed indices
     error = QtCore.Signal(str)
 
-    def __init__(self, level_dir: str, name: str, ext: str, differences: List[Difference], target_indices: List[int], api: str):
+    def __init__(self, level_dir: str, name: str, ext: str, differences: List[Difference], target_indices: List[int]):
         super().__init__()
         self.level_dir = level_dir
         self.name = name
         self.differences = differences
         self.target_indices = target_indices
-        self.api = api
         self.ext = ext
         self.origin_path = os.path.join(level_dir, f"{self.name}_origin{self.ext}")
+
+    def setClient(self, client: str, api: str) -> None:
+        if client == "A8":
+            self.client = A81ImageEditClient(api)
+        else:
+            self.client = GeminiImageEditClient()
 
     @QtCore.Slot()
     def run(self) -> None:
@@ -228,12 +143,11 @@ class AIWorker(QtCore.QObject):
                 mask.save(bufm, "PNG"); mask_bytes = bytes(bufm.data()); bufm.close()
 
                 # 调试：保存看看
-                # QtGui.QImage.fromData(png_bytes).save(os.path.join(self.level_dir, "dbg_input.png"))
-                # QtGui.QImage.fromData(mask_bytes).save(os.path.join(self.level_dir, "dbg_mask.png"))
+                QtGui.QImage.fromData(png_bytes).save(os.path.join(self.level_dir, "dbg_input.png"))
+                QtGui.QImage.fromData(mask_bytes).save(os.path.join(self.level_dir, "dbg_mask.png"))
 
-                req = ImageEditRequester("input", png_bytes, mask_bytes, d.label, self.api)
                 # 获取 AI 返回的图像字节
-                img_bytes = req.send_request()
+                img_bytes = self.client.send_request(image_bytes=png_bytes, mask_bytes=mask_bytes, prompt=d.label)
                 patch = QtGui.QImage.fromData(img_bytes).copy(ox, oy, w, h)
                 # 羽化宽度：短边的 6%（可按需调整/做成参数）
                 feather_px = max(4, int(min(w, h) * 0.06))
