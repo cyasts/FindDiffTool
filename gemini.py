@@ -1,7 +1,5 @@
 from google import genai
 from google.genai import types
-from PIL import Image
-from io import BytesIO
 
 def send_request(image_bytes: bytes, mask_bytes: bytes, prompt: str) -> bytes:
     http_options = types.HttpOptions(

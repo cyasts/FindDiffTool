@@ -1043,6 +1043,8 @@ class DifferenceItem(QtWidgets.QGraphicsObject):
     
 
     def _hit_circle(self, pos: QtCore.QPointF) -> bool:
+        if not self._show_circle:
+            return False
         bbox = self._circle_pixmap_bbox()
         if not bbox:
             # 无 PNG 时退回旧的“半径判定”
