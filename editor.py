@@ -678,13 +678,13 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
         try:
             level_dir = self.level_dir()
             # 删除 {self.name}_region{deleted_index}.png
-            victim = os.path.join(level_dir, f"{self.name}_region{deleted_index}.png")
+            victim = os.path.join(level_dir, f"A", f"{self.name}_region{deleted_index}.png")
             if os.path.isfile(victim):
                 os.remove(victim)
             # 将 {self.name}_region{i}.png -> {self.name}_region{i-1}.png (i 从 deleted_index+1 到 old_count)
             for i in range(deleted_index + 1, old_count + 1):
-                src = os.path.join(level_dir, f"{self.name}_region{i}.png")
-                dst = os.path.join(level_dir, f"{self.name}_region{i-1}.png")
+                src = os.path.join(level_dir, f"A", f"{self.name}_region{i}.png")
+                dst = os.path.join(level_dir, f"A", f"{self.name}_region{i-1}.png")
                 if os.path.isfile(src):
                     # 若目标已存在（理论上不该发生），先移除目标以避免跨平台报错
                     if os.path.isfile(dst):
@@ -792,8 +792,8 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
     def _refresh_ai_overlays(self) -> None:
         # rebuild overlays from disk according to current differences order
         level_dir = self.level_dir()
-        up_path = os.path.join(level_dir, "composite_up.png")
-        down_path = os.path.join(level_dir, "composite_down.png")
+        up_path = os.path.join(level_dir, "B", "composite_up.png")
+        down_path = os.path.join(level_dir, "B", "composite_down.png")
 
         # 若 up/down 不存在，就现做一次
         need_build = (not os.path.isfile(up_path)) or (not os.path.isfile(down_path))
@@ -820,7 +820,7 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
         return os.path.join(self.config_dir, f"{self.name}")
 
     def config_json_path(self) -> str:
-        return os.path.join(self.level_dir(), "config.json")
+        return os.path.join(self.level_dir(), f"A", f"config.json")
 
 
     def validate_before_save(self) -> Tuple[bool, Optional[str]]:
@@ -992,6 +992,9 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
         self._write_config_snapshot()
         file_name = self.name
         file_ext = self.ext
+        str = self.level_dir()
+        os.makedirs(os.path.join(str, f"B"), exist_ok=True)
+        os.makedirs(os.path.join(str, f"A"), exist_ok=True)
         # copy original image into level dir and rename as origin.{ext}
         try:
             src_img = self.pair.image_path
@@ -999,7 +1002,7 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
                 _, ext = os.path.splitext(src_img)
                 if not ext:
                     ext = '.png'
-                dst_img = os.path.join(self.level_dir(), f'{file_name}_origin{file_ext}')
+                dst_img = os.path.join(self.level_dir(), f"B", f'{file_name}_origin{file_ext}')
                 if not os.path.exists(dst_img):
                     shutil.copy2(src_img, dst_img)
         except Exception:
@@ -1084,6 +1087,7 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
 
         os.makedirs(self.level_dir(), exist_ok=True)
         cfg_path = self.config_json_path()
+        os.makedirs(os.path.dirname(cfg_path), exist_ok=True)
         with open(cfg_path, 'w', encoding='utf-8') as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
 
@@ -1112,7 +1116,7 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
 
     def _load_from_dir(self, dir_path: str) -> None:
         # read config.json (gracefully handle missing file as new level)
-        cfg_path = os.path.join(dir_path, 'config.json')
+        cfg_path = os.path.join(dir_path, "A", "config.json")
         if not os.path.isfile(cfg_path):
             # treat as a new blank level
             self._clear_all_items()

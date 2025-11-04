@@ -34,17 +34,17 @@ def _to_premultiplied(img:QImage) -> QImage:
                else img.convertToFormat(QImage.Format_ARGB32_Premultiplied)
 
 def compose_result(level_dir: str, name: str, ext: str, differences: List[Difference], margin: int = 40, gap: int = 24) -> QImage :
-    origin_path = os.path.join(level_dir, f"{name}_origin{ext}")
+    origin_path = os.path.join(level_dir, f"B", f"{name}_origin{ext}")
     base = _qimage_from_path(origin_path)
     up_img, down_img = _render_regions_to_origin(base, differences, level_dir, name)
-    up_img.save(os.path.join(level_dir, "composite_up.png"))
-    down_img.save(os.path.join(level_dir, "composite_down.png"))
+    up_img.save(os.path.join(level_dir, "B", "composite_up.png"))
+    down_img.save(os.path.join(level_dir, "B", "composite_down.png"))
 
     up_ov, down_ov = _render_circle_over_image(up_img, down_img, differences)
 
     result = _compose_four_grid(up_img, down_img, up_ov, down_ov)
 
-    result.save(os.path.join(level_dir, "apreview.png"))
+    result.save(os.path.join(level_dir, "B", "apreview.png"))
 
 def _render_regions_to_origin(base: QtGui.QImage, differences: List[Difference], level_dir: str, name: str) -> Tuple[QImage, QImage]:
     up_img = _to_premultiplied(base).copy()
@@ -53,7 +53,7 @@ def _render_regions_to_origin(base: QtGui.QImage, differences: List[Difference],
     bounds = QtCore.QRect(0, 0, W, H)
 
     for idx, d in enumerate(differences, start = 1):
-        rpath = os.path.join(level_dir, f"{name}_region{idx}.png")
+        rpath = os.path.join(level_dir, f"A", f"{name}_region{idx}.png")
         if not os.path.isfile(rpath):
             continue
         small = _qimage_from_path(rpath)

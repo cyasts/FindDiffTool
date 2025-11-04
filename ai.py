@@ -155,7 +155,7 @@ class AIWorker(QtCore.QObject):
 
                 # 直通 Alpha：避免预乘导致的整体泛灰
                 patch_feathered = _apply_alpha_straight(patch, alpha8)
-                final_path = os.path.join(self.level_dir, f"{self.name}_region{idx}.png")
+                final_path = os.path.join(self.level_dir, f"A", f"{self.name}_region{idx}.png")
                 patch_feathered.save(final_path)
 
                 step += 1
@@ -163,7 +163,7 @@ class AIWorker(QtCore.QObject):
             # compute failures: region files not present
             failed = []
             for idx in self.target_indices:
-                dst = os.path.join(self.level_dir, f"{self.name}_region{idx}.png")
+                dst = os.path.join(self.level_dir, f"A", f"{self.name}_region{idx}.png")
                 if not os.path.isfile(dst):
                     failed.append(idx)
             self.finished.emit(failed)
