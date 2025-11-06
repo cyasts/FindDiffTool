@@ -1002,7 +1002,7 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
                 _, ext = os.path.splitext(src_img)
                 if not ext:
                     ext = '.png'
-                dst_img = os.path.join(self.level_dir(), f"B", f'{file_name}_origin{file_ext}')
+                dst_img = os.path.join(self.level_dir(), f"A", f'{file_name}_origin{file_ext}')
                 if not os.path.exists(dst_img):
                     shutil.copy2(src_img, dst_img)
         except Exception:

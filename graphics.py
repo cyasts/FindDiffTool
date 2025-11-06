@@ -637,7 +637,7 @@ class DifferenceItem(QtWidgets.QGraphicsObject):
         rect = self._current_rect_local()
 
         # 点击区域手柄优先
-        if self._rect_interactions_allowed() and self._show_click:
+        if self._can_hit_click():
             hcode = self._hit_click_handle(pos)
             if hcode:
                 if hcode in ("L","R"): self.setCursor(QtCore.Qt.SizeHorCursor)
@@ -659,7 +659,7 @@ class DifferenceItem(QtWidgets.QGraphicsObject):
         
         # 矩形
         # 角优先
-        if self._rect_interactions_allowed() and self._show_rect:
+        if self._can_hit_rect():
             corner = self._hit_corner(rect, pos)
             if corner >= 0:
                 self.setCursor(QtCore.Qt.SizeFDiagCursor if corner in (0, 2) else QtCore.Qt.SizeBDiagCursor)
@@ -708,24 +708,25 @@ class DifferenceItem(QtWidgets.QGraphicsObject):
         self._edge_code = ''
         rect = self._current_rect_local()
 
-        hcode = self._hit_click_handle(e.pos())
-        if hcode:
-            self._mode = self.Mode.CLICK_EDGE if hcode in ("L","R","T","B") else self.Mode.CLICK_CORNER
-            self._click_hcode = hcode
-            self._click_press_local = e.pos()
-            self._click_press_center, self._click_press_a, self._click_press_b, self._click_press_shape = self._current_click_local()
-            self.setCursor(QtCore.Qt.ClosedHandCursor)
-            e.accept(); return
-        # 点击区域本体
-        if self._hit_click_inside(e.pos()):
-            self._mode = self.Mode.CLICK_MOVE
-            self._click_press_local = e.pos()
-            self._click_press_center, self._click_press_a, self._click_press_b, self._click_press_shape = self._current_click_local()
-            self.setCursor(QtCore.Qt.ClosedHandCursor)
-            e.accept(); return
+        if self._can_hit_click():
+            hcode = self._hit_click_handle(e.pos())
+            if hcode:
+                self._mode = self.Mode.CLICK_EDGE if hcode in ("L","R","T","B") else self.Mode.CLICK_CORNER
+                self._click_hcode = hcode
+                self._click_press_local = e.pos()
+                self._click_press_center, self._click_press_a, self._click_press_b, self._click_press_shape = self._current_click_local()
+                self.setCursor(QtCore.Qt.ClosedHandCursor)
+                e.accept(); return
+            # 点击区域本体
+            if self._hit_click_inside(e.pos()):
+                self._mode = self.Mode.CLICK_MOVE
+                self._click_press_local = e.pos()
+                self._click_press_center, self._click_press_a, self._click_press_b, self._click_press_shape = self._current_click_local()
+                self.setCursor(QtCore.Qt.ClosedHandCursor)
+                e.accept(); return
 
         # 圆命中优先
-        if self._hit_circle(e.pos()):
+        if self._can_hit_circle() and self._hit_circle(e.pos()):
             if not self._show_circle:
                 return False
             self._mode = self.Mode.DRAG_CIRCLE
@@ -735,7 +736,7 @@ class DifferenceItem(QtWidgets.QGraphicsObject):
             self._press_center = QtCore.QPointF(center)
             e.accept(); return
         
-        if self._rect_interactions_allowed():
+        if self._can_hit_rect():
             # 角
             corner = self._hit_corner(rect, e.pos())
             if corner >= 0:
@@ -1023,7 +1024,23 @@ class DifferenceItem(QtWidgets.QGraphicsObject):
         self.update()
 
     # -------------------- 命中工具 --------------------
+
+    # ===== 统一命中前置判定（新增） =====
+    def _can_hit_rect(self) -> bool:
+        """红框是否参与命中：需可见且允许交互（enabled）。"""
+        return self._show_rect and self._rect_interactions_allowed() and self.isVisible()
+
+    def _can_hit_circle(self) -> bool:
+        """圆是否参与命中：需可见。"""
+        return self._show_circle and self.isVisible()
+
+    def _can_hit_click(self) -> bool:
+        """点击区域是否参与命中：需已自定义且可见。"""
+        return self.model.click_customized and self._show_click and self.isVisible()
+
     def _hit_corner(self, rect: QtCore.QRectF, pos: QtCore.QPointF) -> int:
+        if not self._can_hit_rect():
+            return -1
         corners = [rect.topLeft(), rect.topRight(), rect.bottomRight(), rect.bottomLeft()]
         for i, c in enumerate(corners):
             if QtCore.QLineF(pos, c).length() <= self.CORNER_THRESH:
@@ -1031,6 +1048,8 @@ class DifferenceItem(QtWidgets.QGraphicsObject):
         return -1
 
     def _hit_edge(self, rect: QtCore.QRectF, pos: QtCore.QPointF) -> str:
+        if not self._can_hit_rect():
+            return ''
         et = self.EDGE_THRESH
         if 0 <= pos.y() <= rect.height():
             if abs(pos.x()-0.0)            <= et: return 'L'
@@ -1043,7 +1062,7 @@ class DifferenceItem(QtWidgets.QGraphicsObject):
     
 
     def _hit_circle(self, pos: QtCore.QPointF) -> bool:
-        if not self._show_circle:
+        if not self._can_hit_circle():
             return False
         bbox = self._circle_pixmap_bbox()
         if not bbox:
@@ -1058,8 +1077,8 @@ class DifferenceItem(QtWidgets.QGraphicsObject):
         return hit.contains(pos)
     
     def _hit_click_handle(self, pos):
-        if not self.model.click_customized: return None
-        if not self._show_click: return None
+        if not self._can_hit_click():
+            return None
         c, a, b, shape = self._current_click_local()
         handles = self._click_handles(c, a, b, shape)
         pick_edge   = self._scene_pick_radius(16.0)  # L/R/T/B 更宽松
@@ -1074,8 +1093,8 @@ class DifferenceItem(QtWidgets.QGraphicsObject):
         return None
     
     def _hit_click_inside(self, pos: QtCore.QPointF) -> bool:
-        if not self.model.click_customized: return False
-        if not self._show_click : return False
+        if not self._can_hit_click():
+            return None
         c, a, b, shape = self._current_click_local()
         dx, dy = pos.x()-c.x(), pos.y()-c.y()
         if shape == "rect":
