@@ -93,7 +93,7 @@ class AIWorker(QtCore.QObject):
         self.differences = differences
         self.target_indices = target_indices
         self.ext = ext
-        self.origin_path = os.path.join(level_dir, f"{self.name}_origin{self.ext}")
+        self.origin_path = os.path.join(level_dir, f"A", f"{self.name}_origin{self.ext}")
 
     def setClient(self, client: str, api: str) -> None:
         if client == "A8":
@@ -143,8 +143,8 @@ class AIWorker(QtCore.QObject):
                 mask.save(bufm, "PNG"); mask_bytes = bytes(bufm.data()); bufm.close()
 
                 # 调试：保存看看
-                QtGui.QImage.fromData(png_bytes).save(os.path.join(self.level_dir, "dbg_input.png"))
-                QtGui.QImage.fromData(mask_bytes).save(os.path.join(self.level_dir, "dbg_mask.png"))
+                # QtGui.QImage.fromData(png_bytes).save(os.path.join(self.level_dir, "dbg_input.png"))
+                # QtGui.QImage.fromData(mask_bytes).save(os.path.join(self.level_dir, "dbg_mask.png"))
 
                 # 获取 AI 返回的图像字节
                 img_bytes = self.client.send_request(image_bytes=png_bytes, mask_bytes=mask_bytes, prompt=d.label)
