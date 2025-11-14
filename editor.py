@@ -888,13 +888,13 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
             return
         # Step 1: alidation
         # 限制茬点数量：仅当茬点数为 15/20/25 时允许AI处理
-        allowed_counts = {15, 20, 25}
+        allowed_counts = {15, 20, 25, 30}
         current_count = len(self.differences)
         if current_count not in allowed_counts:
             QtWidgets.QMessageBox.information(
                 self,
                 "AI处理",
-                f"当前茬点数为 {current_count}，仅支持 15、20 或 25 个，请调整后重试。"
+                f"当前茬点数为 {current_count}，仅支持 15、20、25 或 30 个，请调整后重试。"
             )
             return
 
