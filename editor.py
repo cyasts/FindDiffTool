@@ -632,12 +632,21 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
         diff = next((d for d in self.differences if d.id == diff_id), None)
         if not diff:
             return
-        diff.enabled = not diff.enabled
+        
+        checked = True
+        sender = self.sender()
+        if isinstance(sender, QtWidgets.QCheckBox):
+            checked = sender.isChecked()
+        diff.enabled = bool(checked)
+
+
         u = self.rect_items_up.get(diff.id)
         d = self.rect_items_down.get(diff.id)
         if u:
+            u.model.data.enabled = diff.enabled
             u.updateEnabledFlags()
         if d:
+            d.model.data.enabled = diff.enabled
             d.updateEnabledFlags()
         self._make_dirty()
         self.update_total_count()
