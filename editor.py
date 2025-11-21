@@ -494,7 +494,7 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
 
                 enabled = QtWidgets.QCheckBox()
                 enabled.setChecked(diff.enabled)
-                enabled.stateChanged.connect(lambda _state, _id=diff.id: self.on_enabled_toggled(_id))
+                enabled.stateChanged.connect(lambda _state, _id=diff.id: self.on_enabled_toggled(_id, bool(_state)))
 
                 visibled = QtWidgets.QCheckBox()
                 visibled.setChecked(diff.visible)
@@ -628,17 +628,13 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
         if d:
             d.updateLabel()
 
-    def on_enabled_toggled(self, diff_id: str) -> None:
+    def on_enabled_toggled(self, diff_id: str, checked: bool) -> None:
         diff = next((d for d in self.differences if d.id == diff_id), None)
         if not diff:
             return
-        
-        checked = True
-        sender = self.sender()
-        if isinstance(sender, QtWidgets.QCheckBox):
-            checked = sender.isChecked()
-        diff.enabled = bool(checked)
 
+        diff.enabled = checked
+        print("on_enabled_toggled:", diff.id, diff.enabled)
 
         u = self.rect_items_up.get(diff.id)
         d = self.rect_items_down.get(diff.id)
