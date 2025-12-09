@@ -14,7 +14,10 @@ IMAGE_EXTENSIONS = {'.png', '.jpg', '.jpeg', '.bmp', '.gif'}
 class ImagePair:
     name: str
     directory: str
-    image_path: str
+    image_path_a: str
+    image_path_b: str
+    ext_a: str
+    ext_b: str
 
 
 class ImageCard(QtWidgets.QFrame):
@@ -42,7 +45,7 @@ class ImageCard(QtWidgets.QFrame):
         image_label.setFixedSize(240, 150)
         image_label.setAlignment(QtCore.Qt.AlignCenter)
         image_label.setStyleSheet("border-top-left-radius: 8px; border-top-right-radius: 8px;")
-        pixmap = QtGui.QPixmap(self.pair.image_path)
+        pixmap = QtGui.QPixmap(self.pair.image_path_a)
         if not pixmap.isNull():
             image_label.setPixmap(pixmap.scaled(image_label.size(), QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation))
         layout.addWidget(image_label)
@@ -90,7 +93,7 @@ class FlowGrid(QtWidgets.QScrollArea):
                 w.setParent(None)
 
         if not cards:
-            empty = QtWidgets.QLabel("暂无图片\n请点击\"加载图片\"按钮选择包含图片资源的文件夹")
+            empty = QtWidgets.QLabel("暂无图片\n请点击\"加载图片\"按钮选择包含图片资源的文件夹（文件名需匹配 *_A 与 *_B）")
             empty.setAlignment(QtCore.Qt.AlignCenter)
             empty.setStyleSheet("color:#666; padding: 60px 20px;")
             self.grid.addWidget(empty, 0, 0)
@@ -219,30 +222,22 @@ class MainWindow(QtWidgets.QMainWindow):
             self.refresh_config_dir_label()
 
     def _validate_image_path(self, pair: ImagePair) -> (bool, str):
-        """检查文件存在、可读、且 Qt 能加载。"""
-        path = pair.image_path
-        if not path:
-            return False, "未提供图片路径。"
-
-        # 1) 路径存在且是文件
-        if not os.path.exists(path):
-            return False, f"图片文件不存在：\n{path}"
-        if not os.path.isfile(path):
-            return False, f"不是一个有效文件：\n{path}"
-
-        # 2) 可读权限
-        if not os.access(path, os.R_OK):
-            return False, f"没有读取权限：\n{path}"
-
-        # 3) Qt 能否加载（判定文件是否损坏/格式不支持）
-        pix = QtGui.QPixmap(path)
-        if pix.isNull():
-            # 进一步尝试用 QImageReader 看具体错误
-            reader = QtGui.QImageReader(path)
-            fmt = reader.format().data().decode("ascii", "ignore") if reader.format() else "unknown"
-            err = reader.errorString() if hasattr(reader, "errorString") else "unknown"
-            return False, f"无法加载图片（格式:{fmt}）：\n{path}\n错误：{err}"
-
+        """检查 A/B 文件存在、可读、且 Qt 能加载。"""
+        for label, path in (("A", pair.image_path_a), ("B", pair.image_path_b)):
+            if not path:
+                return False, f"未提供{label}图片路径。"
+            if not os.path.exists(path):
+                return False, f"{label}图片文件不存在：\n{path}"
+            if not os.path.isfile(path):
+                return False, f"{label}不是一个有效文件：\n{path}"
+            if not os.access(path, os.R_OK):
+                return False, f"{label}没有读取权限：\n{path}"
+            pix = QtGui.QPixmap(path)
+            if pix.isNull():
+                reader = QtGui.QImageReader(path)
+                fmt = reader.format().data().decode("ascii", "ignore") if reader.format() else "unknown"
+                err = reader.errorString() if hasattr(reader, "errorString") else "unknown"
+                return False, f"无法加载{label}图片（格式:{fmt}）：\n{path}\n错误：{err}"
         return True, ""
 
     def on_load_images(self) -> None:
@@ -263,11 +258,37 @@ class MainWindow(QtWidgets.QMainWindow):
             return
 
         image_files = [f for f in files if os.path.splitext(f)[1].lower() in IMAGE_EXTENSIONS]
-        pairs: List[ImagePair] = []
+
+        paired: dict = {}
         for file in image_files:
-            name = os.path.splitext(file)[0]
-            path = os.path.join(directory, file)
-            pairs.append(ImagePair(name=name, directory=directory, image_path=path))
+            stem, ext = os.path.splitext(file)
+            if "_" not in stem:
+                continue
+            base, suffix = stem.rsplit("_", 1)
+            if suffix.lower() not in ("a", "b") or not base:
+                continue
+            entry = paired.setdefault(base, {"A": None, "B": None, "ext_a": None, "ext_b": None})
+            full_path = os.path.join(directory, file)
+            if suffix.lower() == "a":
+                entry["A"] = full_path
+                entry["ext_a"] = ext
+            else:
+                entry["B"] = full_path
+                entry["ext_b"] = ext
+
+        pairs: List[ImagePair] = []
+        for base, info in paired.items():
+            if info["A"] and info["B"]:
+                pairs.append(
+                    ImagePair(
+                        name=base,
+                        directory=directory,
+                        image_path_a=info["A"],
+                        image_path_b=info["B"],
+                        ext_a=info["ext_a"] or os.path.splitext(info["A"])[1],
+                        ext_b=info["ext_b"] or os.path.splitext(info["B"])[1],
+                    )
+                )
 
         cards: List[ImageCard] = []
         for pair in pairs:
@@ -279,9 +300,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self.image_dir = directory
         self.settings.setValue("imageDir", self.image_dir)
         if from_startup:
-            self.set_status(f"成功加载 {len(cards)} 张图片（来自上次使用的图片目录）")
+            self.set_status(f"成功加载 {len(cards)} 组图片（来自上次使用的图片目录）")
         else:
-            self.set_status(f"成功加载 {len(cards)} 张图片")
+            if not cards:
+                self.set_status("未找到成对的图片，请确保文件名形如 name_A.jpg 和 name_B.jpg")
+            else:
+                self.set_status(f"成功加载 {len(cards)} 组图片")
 
     def refresh_config_dir_label(self) -> None:
         path = self.config_dir if self.config_dir else "未设置"
@@ -349,5 +373,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
-
-
