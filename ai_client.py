@@ -1,5 +1,6 @@
 import base64
 import io
+from typing import Optional
 
 import requests
 from google import genai
@@ -87,9 +88,11 @@ class A81ImageEditClient:
 
 http_options = types.HttpOptions(
     client_args={
-        "proxy": "socks5://127.0.0.1:7890"
+        "proxy": "socks5://127.0.0.1:7890",
     },  # Clash 通常 socks 是 7891；若你确实把 socks 配成 7890，就保留 7890
-    async_client_args={"proxy": "socks5://127.0.0.1:7890"},
+    async_client_args={
+        "proxy": "socks5://127.0.0.1:7890",
+    },
 )
 
 
@@ -98,7 +101,7 @@ class GeminiImageEditClient:
         self.model = "gemini-2.5-flash-image"
         self.client = genai.Client(vertexai=True, api_key=GEMINI_key, http_options=http_options)
 
-    def send_request(self, image_bytes: bytes, mask_bytes: bytes, prompt: str) -> bytes:
+    def send_request(self, image_bytes: bytes, mask_bytes: bytes, prompt: str) -> Optional[bytes]:
         resp = self.client.models.generate_content(
             model=self.model,
             contents=[
@@ -113,4 +116,4 @@ class GeminiImageEditClient:
                 print(part.text)
             elif part.inline_data is not None:
                 return part.inline_data.data
-        return ""
+        return None
