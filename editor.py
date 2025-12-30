@@ -1,3 +1,4 @@
+# -*- coding:utf-8 -*-
 import json
 import math
 import os
@@ -215,7 +216,7 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
 
         # wire
         self.btn_save.clicked.connect(self.on_save_clicked)
-        self.btn_submit.clicked.connect(self.on_ai_process)
+        self.btn_submit.clicked.connect(self.on_ftc_submit)
         self.btn_close.clicked.connect(self.close)
 
         self.btn_gen_click_region.clicked.connect(self.on_generate_click_regions)
@@ -874,7 +875,7 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
 
     def level_dir(self) -> str:
         # directory for this level
-        return os.path.join(self.config_dir, f"{self.name}")
+        return os.path.normpath(os.path.join(self.config_dir, f"{self.name}"))
 
     def config_json_path(self) -> str:
         return os.path.join(self.level_dir(), f"A", f"config.json")
@@ -986,6 +987,24 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
         self._ai_worker.error.connect(self._ai_slot_error, QtCore.Qt.QueuedConnection)
         self._ai_thread.finished.connect(self._ai_thread.deleteLater)
         self._ai_thread.start()
+
+    def on_ftc_submit(self) -> None:
+        # 保存前置：未保存则禁止处理
+        if getattr(self, "_is_dirty", False) or self.status == "unsaved":
+            QtWidgets.QMessageBox.information(self, "提示", "当前修改尚未保存，请先保存后再进行AI处理。")
+            return
+
+        targets: List[int] = []
+        for idx, d in enumerate(self.differences, start=1):
+            if d.enabled:
+                targets.append(idx)
+        if not targets:
+            QtWidgets.QMessageBox.information(self, "AI处理", "未勾选茬点，请勾选要处理的茬点")
+            return
+
+        # 准备 origin 路径
+        level_dir = self.level_dir()
+        print(f"{level_dir=}")
 
     def on_level_changed(self, diff_id: str, new_level: int) -> None:
         """列表里切换 hint level（1..15）。更新 dataclass，并驱动场景图元重绘。"""
