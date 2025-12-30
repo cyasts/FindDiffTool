@@ -1,8 +1,11 @@
-import os, math
+import math
+import os
 from typing import List, Tuple
+
 from PySide6 import QtCore, QtGui
-from models import Difference, RADIUS_LEVELS
+
 import img_rc
+from models import RADIUS_LEVELS, Difference
 
 QImage = QtGui.QImage
 

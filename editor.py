@@ -1,13 +1,23 @@
-import os, json, math
-import shutil, time, uuid
+import json
+import math
+import os
+import shutil
+import time
+import uuid
 from typing import Dict, List, Optional, Tuple
+
 from PySide6 import QtCore, QtGui, QtWidgets
 
-from utils import compose_result
-from models import Difference, RADIUS_LEVELS, MIN_RECT_SIZE, CATEGORY_COLOR_MAP
-from scenes import ImageScene, ImageView
-from graphics import DifferenceItem
 from ai import AIWorker
+from graphics import DifferenceItem
+from models import (
+    CATEGORY_COLOR_MAP,
+    MIN_RECT_SIZE,
+    RADIUS_LEVELS,
+    Difference,
+)
+from scenes import ImageScene, ImageView
+from utils import compose_result
 
 
 def now_id() -> str:

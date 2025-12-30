@@ -1,12 +1,18 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 
+from typing import Dict, Optional, Tuple
+
 from PySide6 import QtCore, QtGui, QtWidgets
-from typing import Optional, Dict, Tuple
+
+from circle_provider import CirclePixmapProvider
 
 # 由你的工程提供
-from models import Difference, RADIUS_LEVELS, MIN_RECT_SIZE
-from circle_provider import CirclePixmapProvider
+from models import (
+    MIN_RECT_SIZE,
+    RADIUS_LEVELS,
+    Difference,
+)
 
 # ==============================================================
 # 1) Model：作为唯一真源（SSOT），负责自动维护 hint_level

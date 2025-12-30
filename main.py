@@ -4,8 +4,9 @@ from dataclasses import dataclass
 from typing import List, Optional
 
 from PySide6 import QtCore, QtGui, QtWidgets
-from editor import DifferenceEditorWindow
+
 from circle_provider import CirclePixmapProvider
+from editor import DifferenceEditorWindow
 
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".bmp", ".gif"}
 

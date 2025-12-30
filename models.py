@@ -1,5 +1,6 @@
 from dataclasses import dataclass
-from typing import List, Dict
+from typing import Dict, List
+
 from PySide6 import QtGui
 
 # Discrete hint-circle radius levels (in natural pixels)

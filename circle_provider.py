@@ -1,6 +1,7 @@
 # circle_provider.py
 # 全局共享，不缩放：只按 level 加载一张 QPixmap（来自 qrc）
 from PySide6 import QtGui
+
 import img_rc
 
 

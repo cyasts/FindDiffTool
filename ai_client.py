@@ -1,8 +1,11 @@
-import requests, base64, io
-from models import CANVAS_W, CANVAS_H
+import base64
+import io
+
+import requests
 from google import genai
 from google.genai import types
 
+from models import CANVAS_H, CANVAS_W
 from secret_key import A8_key, GEMINI_key
 
 

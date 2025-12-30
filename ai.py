@@ -1,11 +1,18 @@
 import os
 from typing import List
+
 from PySide6 import QtCore, QtGui
 
-from models import Difference, CANVAS_W, CANVAS_H
+from ai_client import (
+    A81ImageEditClient,
+    GeminiImageEditClient,
+)
+from models import (
+    CANVAS_H,
+    CANVAS_W,
+    Difference,
+)
 from utils import quantize_roi
-
-from ai_client import A81ImageEditClient, GeminiImageEditClient
 
 
 def _make_rect_feather_alpha8(w: int, h: int, f: int) -> QtGui.QImage:
