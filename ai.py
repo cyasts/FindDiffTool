@@ -7,6 +7,7 @@ from utils import quantize_roi
 
 from ai_client import A81ImageEditClient, GeminiImageEditClient
 
+
 def _make_rect_feather_alpha8(w: int, h: int, f: int) -> QtGui.QImage:
     """生成矩形四周羽化的 Alpha8 掩膜，中心=255，边缘渐变到0"""
     f = max(1, min(f, (w // 2) - 1 if w >= 4 else 1, (h // 2) - 1 if h >= 4 else 1))
@@ -17,7 +18,7 @@ def _make_rect_feather_alpha8(w: int, h: int, f: int) -> QtGui.QImage:
     p.setPen(QtCore.Qt.NoPen)
 
     # 中心不透明
-    inner = QtCore.QRect(f, f, max(0, w - 2*f), max(0, h - 2*f))
+    inner = QtCore.QRect(f, f, max(0, w - 2 * f), max(0, h - 2 * f))
     if inner.width() > 0 and inner.height() > 0:
         p.fillRect(inner, QtGui.QColor(0, 0, 0, 255))
 
@@ -49,7 +50,7 @@ def _make_rect_feather_alpha8(w: int, h: int, f: int) -> QtGui.QImage:
         rg.setColorAt(0.0, QtGui.QColor(0, 0, 0, 255))
         rg.setColorAt(1.0, QtGui.QColor(0, 0, 0, 0))
         p.setBrush(QtGui.QBrush(rg))
-        p.drawEllipse(QtCore.QRect(cx - f, cy - f, 2*f, 2*f))
+        p.drawEllipse(QtCore.QRect(cx - f, cy - f, 2 * f, 2 * f))
 
     p.end()
     return alpha
@@ -74,19 +75,22 @@ def _apply_alpha_straight(patch: QtGui.QImage, alpha8: QtGui.QImage) -> QtGui.QI
         arow = bytes(a_ptr)
         # 每4字节一像素，把第4个字节(索引3)替换为 alpha
         for x in range(w):
-            row[4*x + 3] = arow[x]
+            row[4 * x + 3] = arow[x]
         # 回写
         mv = memoryview(px)
-        mv[:len(row)] = row
+        mv[: len(row)] = row
 
     return out
 
+
 class AIWorker(QtCore.QObject):
     progressed = QtCore.Signal(int, int)  # step, total
-    finished = QtCore.Signal(list)        # failed indices
+    finished = QtCore.Signal(list)  # failed indices
     error = QtCore.Signal(str)
 
-    def __init__(self, level_dir: str, name: str, ext: str, differences: List[Difference], target_indices: List[int]):
+    def __init__(
+        self, level_dir: str, name: str, ext: str, differences: List[Difference], target_indices: List[int]
+    ):
         super().__init__()
         self.level_dir = level_dir
         self.name = name
@@ -108,7 +112,7 @@ class AIWorker(QtCore.QObject):
             reader.setAutoTransform(False)  # 与 _imread_any 保持一致
             img = reader.read()
             if img.isNull():
-                raise RuntimeError('无法打开 origin 图像')
+                raise RuntimeError("无法打开 origin 图像")
 
             total = len(self.target_indices)
             W, H = img.width(), img.height()
@@ -121,33 +125,41 @@ class AIWorker(QtCore.QObject):
 
                 # 1) 输入图
                 canvas = QtGui.QImage(CANVAS_W, CANVAS_H, QtGui.QImage.Format_ARGB32)
-                canvas.fill(QtGui.QColor(255,255,255,255))             # 外部为纯白不透明
+                canvas.fill(QtGui.QColor(255, 255, 255, 255))  # 外部为纯白不透明
                 ox = (CANVAS_W - w) // 2
                 oy = (CANVAS_H - h) // 2
                 p = QtGui.QPainter(canvas)
-                p.drawImage(ox, oy, subimg)                            # ROI 贴中间
+                p.drawImage(ox, oy, subimg)  # ROI 贴中间
                 p.end()
 
-                buf = QtCore.QBuffer(); buf.open(QtCore.QIODevice.ReadWrite)
-                canvas.save(buf, "PNG"); png_bytes = bytes(buf.data()); buf.close()
+                buf = QtCore.QBuffer()
+                buf.open(QtCore.QIODevice.ReadWrite)
+                canvas.save(buf, "PNG")
+                png_bytes = bytes(buf.data())
+                buf.close()
 
                 # 2) 掩膜：外部不透明，ROI 清成透明
                 mask = QtGui.QImage(CANVAS_W, CANVAS_H, QtGui.QImage.Format_ARGB32)
-                mask.fill(QtGui.QColor(255,255,255,255))
+                mask.fill(QtGui.QColor(255, 255, 255, 255))
                 mp = QtGui.QPainter(mask)
                 mp.setCompositionMode(QtGui.QPainter.CompositionMode_Clear)
                 mp.fillRect(QtCore.QRect(ox, oy, w, h), QtCore.Qt.transparent)
                 mp.end()
 
-                bufm = QtCore.QBuffer(); bufm.open(QtCore.QIODevice.ReadWrite)
-                mask.save(bufm, "PNG"); mask_bytes = bytes(bufm.data()); bufm.close()
+                bufm = QtCore.QBuffer()
+                bufm.open(QtCore.QIODevice.ReadWrite)
+                mask.save(bufm, "PNG")
+                mask_bytes = bytes(bufm.data())
+                bufm.close()
 
                 # 调试：保存看看
                 # QtGui.QImage.fromData(png_bytes).save(os.path.join(self.level_dir, "dbg_input.png"))
                 # QtGui.QImage.fromData(mask_bytes).save(os.path.join(self.level_dir, "dbg_mask.png"))
 
                 # 获取 AI 返回的图像字节
-                img_bytes = self.client.send_request(image_bytes=png_bytes, mask_bytes=mask_bytes, prompt=d.label)
+                img_bytes = self.client.send_request(
+                    image_bytes=png_bytes, mask_bytes=mask_bytes, prompt=d.label
+                )
                 patch = QtGui.QImage.fromData(img_bytes).copy(ox, oy, w, h)
                 # 羽化宽度：短边的 6%（可按需调整/做成参数）
                 feather_px = max(4, int(min(w, h) * 0.06))

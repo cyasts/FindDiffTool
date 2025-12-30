@@ -6,22 +6,26 @@ import img_rc
 
 QImage = QtGui.QImage
 
+
 def _round_half_up(x: float) -> int:
     # 与 round() 的 bankers rounding 不同，这里 0.5 -> 1，1.5 -> 2，更稳定
     return int(math.floor(x + 0.5))
 
+
 def quantize_roi(x: float, y: float, w: float, h: float, W: int, H: int):
-    l = max(0, min(W-1, _round_half_up(x)))
-    t = max(0, min(H-1, _round_half_up(y)))
+    l = max(0, min(W - 1, _round_half_up(x)))
+    t = max(0, min(H - 1, _round_half_up(y)))
     qw = max(1, min(W - l, _round_half_up(w)))
     qh = max(1, min(H - t, _round_half_up(h)))
     return l, t, qw, qh
 
+
 def _radius_for(lvl: int) -> int:
-    idx  = max(0, min(len(RADIUS_LEVELS) - 1, int(lvl)))
+    idx = max(0, min(len(RADIUS_LEVELS) - 1, int(lvl)))
     return int(RADIUS_LEVELS[idx])
 
-def  _qimage_from_path(path: str) -> QImage:
+
+def _qimage_from_path(path: str) -> QImage:
     r = QtGui.QImageReader(path)
     r.setAutoTransform(False)
     img = r.read()
@@ -29,11 +33,18 @@ def  _qimage_from_path(path: str) -> QImage:
         print(f"无法读取图片:{path}")
     return img
 
-def _to_premultiplied(img:QImage) -> QImage:
-    return img if img.format() == QImage.Format_ARGB32_Premultiplied \
-               else img.convertToFormat(QImage.Format_ARGB32_Premultiplied)
 
-def compose_result(level_dir: str, name: str, ext: str, differences: List[Difference], margin: int = 40, gap: int = 24) -> QImage :
+def _to_premultiplied(img: QImage) -> QImage:
+    return (
+        img
+        if img.format() == QImage.Format_ARGB32_Premultiplied
+        else img.convertToFormat(QImage.Format_ARGB32_Premultiplied)
+    )
+
+
+def compose_result(
+    level_dir: str, name: str, ext: str, differences: List[Difference], margin: int = 40, gap: int = 24
+) -> QImage:
     origin_path = os.path.join(level_dir, f"A", f"{name}_origin{ext}")
     base = _qimage_from_path(origin_path)
     up_img, down_img = _render_regions_to_origin(base, differences, level_dir, name)
@@ -46,13 +57,16 @@ def compose_result(level_dir: str, name: str, ext: str, differences: List[Differ
 
     result.save(os.path.join(level_dir, "B", "apreview.png"))
 
-def _render_regions_to_origin(base: QtGui.QImage, differences: List[Difference], level_dir: str, name: str) -> Tuple[QImage, QImage]:
+
+def _render_regions_to_origin(
+    base: QtGui.QImage, differences: List[Difference], level_dir: str, name: str
+) -> Tuple[QImage, QImage]:
     up_img = _to_premultiplied(base).copy()
     down_img = up_img.copy()
     W, H = base.width(), base.height()
     bounds = QtCore.QRect(0, 0, W, H)
 
-    for idx, d in enumerate(differences, start = 1):
+    for idx, d in enumerate(differences, start=1):
         rpath = os.path.join(level_dir, f"A", f"{name}_region{idx}.png")
         if not os.path.isfile(rpath):
             continue
@@ -68,8 +82,10 @@ def _render_regions_to_origin(base: QtGui.QImage, differences: List[Difference],
 
     return up_img, down_img
 
-def _render_circle_over_image(up_img: QImage, down_img: QImage,
-                              differences: List[Difference]) -> Tuple[QImage, QImage]:
+
+def _render_circle_over_image(
+    up_img: QImage, down_img: QImage, differences: List[Difference]
+) -> Tuple[QImage, QImage]:
     u = up_img.copy()
     d = down_img.copy()
     W, H = u.width(), u.height()
@@ -77,7 +93,7 @@ def _render_circle_over_image(up_img: QImage, down_img: QImage,
 
     for diff in differences:
         # 圆心：未设置则回退到红框中心（与编辑器一致）
-        cx = diff.cx if diff.cx >= 0 else (diff.x + diff.width  * 0.5)
+        cx = diff.cx if diff.cx >= 0 else (diff.x + diff.width * 0.5)
         cy = diff.cy if diff.cy >= 0 else (diff.y + diff.height * 0.5)
 
         lvl = int(diff.hint_level)
@@ -93,7 +109,7 @@ def _render_circle_over_image(up_img: QImage, down_img: QImage,
             pass
 
         # 圈图“逻辑尺寸”（不缩放）
-        cw = circle.width()  / (dpr or 1.0)
+        cw = circle.width() / (dpr or 1.0)
         ch = circle.height() / (dpr or 1.0)
 
         # 以圆心对齐贴图：左上角 = (cx - cw/2, cy - ch/2)
@@ -106,7 +122,14 @@ def _render_circle_over_image(up_img: QImage, down_img: QImage,
     return u, d
 
 
-def _compose_four_grid(up_img: QImage, down_img: QImage, overlay_up:QImage, overlay_down: QImage, margin: int = 40, gap: int = 24)-> QImage:
+def _compose_four_grid(
+    up_img: QImage,
+    down_img: QImage,
+    overlay_up: QImage,
+    overlay_down: QImage,
+    margin: int = 40,
+    gap: int = 24,
+) -> QImage:
     w, h = up_img.width(), up_img.height()
 
     W = margin + w + gap + w + margin
@@ -134,7 +157,8 @@ def _compose_four_grid(up_img: QImage, down_img: QImage, overlay_up:QImage, over
     p.end()
     return canvas
 
-def _draw_to_image(target: QImage, small: QImage, l:int, t: int, bounds: QtCore.QRect):
+
+def _draw_to_image(target: QImage, small: QImage, l: int, t: int, bounds: QtCore.QRect):
     if small.isNull():
         return
     small = _to_premultiplied(small)
@@ -143,11 +167,7 @@ def _draw_to_image(target: QImage, small: QImage, l:int, t: int, bounds: QtCore.
     inter = dest.intersected(bounds)
     if inter.isEmpty():
         return
-    src = QtCore.QRect(
-        inter.left() - dest.left(),
-        inter.top() - dest.top(),
-        inter.width(), inter.height()
-    )
+    src = QtCore.QRect(inter.left() - dest.left(), inter.top() - dest.top(), inter.width(), inter.height())
 
     p = QtGui.QPainter(target)
     p.setCompositionMode(QtGui.QPainter.CompositionMode_SourceOver)

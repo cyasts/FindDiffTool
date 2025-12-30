@@ -5,6 +5,7 @@ from google.genai import types
 
 from secret_key import A8_key, GEMINI_key
 
+
 def generate_prompt(prop) -> str:
     return (
         "任务设定：我从一张大图裁出 ROI 放到固定画布中央；"
@@ -20,34 +21,33 @@ def generate_prompt(prop) -> str:
         f"任务内容：{prop}"
     )
 
+
 class A81ImageEditClient:
     def __init__(self, api: str):
-        if (api == "A81"):
+        if api == "A81":
             self.BASE_URL = "https://ai.t8star.cn/"
-        elif (api == "HK"):
+        elif api == "HK":
             self.BASE_URL = "https://hk-api.gptbest.vip"
-        elif (api == "US"):
+        elif api == "US":
             self.BASE_URL = "https://api.gptbest.vip"
-        elif (api == "A82"):
+        elif api == "A82":
             self.BASE_URL = "http://104.194.8.112:9088"
-        self.headers = {
-            'Authorization': f'Bearer {A8_key}'
-        }
+        self.headers = {"Authorization": f"Bearer {A8_key}"}
         self.url = f"{self.BASE_URL}/v1/images/edits"
         self.MODEL = "nano-banana"
 
     def send_request(self, image_bytes: bytes, mask_bytes: bytes, prompt: str) -> bytes:
         # 记录原始图片尺寸
         files = [
-            ('image', ('input.png', io.BytesIO(image_bytes), 'image/png')),
-            ('mask', ('mask.png', io.BytesIO(mask_bytes), "image/png")),
+            ("image", ("input.png", io.BytesIO(image_bytes), "image/png")),
+            ("mask", ("mask.png", io.BytesIO(mask_bytes), "image/png")),
         ]
         payload = {
-            'model': self.MODEL,
-            'prompt': generate_prompt(prompt),
-            'response_format': 'b64_json',
+            "model": self.MODEL,
+            "prompt": generate_prompt(prompt),
+            "response_format": "b64_json",
             # 'aspect_ratio': '4:3',
-            'size': f"{CANVAS_W}x{CANVAS_H}",
+            "size": f"{CANVAS_W}x{CANVAS_H}",
         }
         response = requests.request("POST", self.url, headers=self.headers, data=payload, files=files)
 
@@ -56,24 +56,24 @@ class A81ImageEditClient:
         except Exception:
             raise RuntimeError(f"AI返回非JSON: {response.text[:200]}")
 
-        if 'data' not in resp_json or not resp_json['data']:
+        if "data" not in resp_json or not resp_json["data"]:
             raise RuntimeError("AI返回数据为空")
 
-        data0 = resp_json['data'][0]
-        b64img = data0.get('b64_json')
+        data0 = resp_json["data"][0]
+        b64img = data0.get("b64_json")
         if b64img:
             # 兼容 data url 前缀
-            if b64img.startswith('data:image'):
-                b64img = b64img.split(',', 1)[-1]
-            b64img = ''.join(b64img.split())
+            if b64img.startswith("data:image"):
+                b64img = b64img.split(",", 1)[-1]
+            b64img = "".join(b64img.split())
             # 修复base64 padding
             missing_padding = len(b64img) % 4
             if missing_padding:
-                b64img += '=' * (4 - missing_padding)
+                b64img += "=" * (4 - missing_padding)
             img_bytes = base64.b64decode(b64img)
 
-        elif 'url' in data0:
-            img_url = data0['url']
+        elif "url" in data0:
+            img_url = data0["url"]
             img_resp = requests.get(img_url)
             img_bytes = img_resp.content
         else:
@@ -81,28 +81,28 @@ class A81ImageEditClient:
 
         return img_bytes
 
+
 http_options = types.HttpOptions(
-    client_args={'proxy': 'socks5://127.0.0.1:7890'},       # Clash 通常 socks 是 7891；若你确实把 socks 配成 7890，就保留 7890
-    async_client_args={'proxy': 'socks5://127.0.0.1:7890'},
+    client_args={
+        "proxy": "socks5://127.0.0.1:7890"
+    },  # Clash 通常 socks 是 7891；若你确实把 socks 配成 7890，就保留 7890
+    async_client_args={"proxy": "socks5://127.0.0.1:7890"},
 )
+
 
 class GeminiImageEditClient:
     def __init__(self):
         self.model = "gemini-2.5-flash-image"
-        self.client = genai.Client(
-            vertexai=True,
-            api_key=GEMINI_key,
-            http_options=http_options
-        )
+        self.client = genai.Client(vertexai=True, api_key=GEMINI_key, http_options=http_options)
 
     def send_request(self, image_bytes: bytes, mask_bytes: bytes, prompt: str) -> bytes:
         resp = self.client.models.generate_content(
             model=self.model,
             contents=[
                 generate_prompt(prompt),
-                types.Part.from_bytes(data=image_bytes, mime_type='image/png'),
-                types.Part.from_bytes(data=mask_bytes, mime_type='image/png'),
-            ]
+                types.Part.from_bytes(data=image_bytes, mime_type="image/png"),
+                types.Part.from_bytes(data=mask_bytes, mime_type="image/png"),
+            ],
         )
 
         for part in resp.candidates[0].content.parts:

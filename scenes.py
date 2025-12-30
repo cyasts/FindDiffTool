@@ -1,5 +1,6 @@
 from PySide6 import QtCore, QtGui, QtWidgets
 
+
 class ImageScene(QtWidgets.QGraphicsScene):
     def __init__(self, pixmap: QtGui.QPixmap):
         super().__init__(0, 0, pixmap.width(), pixmap.height())

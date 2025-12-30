@@ -3,6 +3,7 @@
 from PySide6 import QtGui
 import img_rc
 
+
 class CirclePixmapProvider:
     _inst = None
 
