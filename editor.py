@@ -92,7 +92,10 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
         down_row.addLayout(down_left, 1)
         self.down_side = self._build_side_panel(section='down')
         down_row.addWidget(self.down_side, 0)
-        # vbox_root.addLayout(down_row, 1)
+        vbox_root.addLayout(down_row, 1)
+
+        self.down_view.setVisible(False)
+        self.down_side.setVisible(False)
 
         # Bottom toolbar
         bottom = QtWidgets.QWidget()
