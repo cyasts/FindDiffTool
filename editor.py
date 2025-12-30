@@ -229,19 +229,24 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
 
         # style buttons
         self.btn_save.setStyleSheet(
-            "QPushButton{background:#0d6efd;color:#fff;padding:6px 14px;border-radius:6px;border:1px solid #0d6efd;} QPushButton:hover{background:#0b5ed7;border-color:#0b5ed7;}"
+            "QPushButton{background:#0d6efd;color:#fff;padding:6px 14px;border-radius:6px;border:1px solid #0d6efd;}"
+            "QPushButton:hover{background:#0b5ed7;border-color:#0b5ed7;}"
         )
         self.btn_submit.setStyleSheet(
-            "QPushButton{background:#28a745;color:#fff;padding:6px 14px;border-radius:6px;border:1px solid #28a745;} QPushButton:hover{background:#1e7e34;border-color:#1e7e34;}"
+            "QPushButton{background:#28a745;color:#fff;padding:6px 14px;border-radius:6px;border:1px solid #28a745;}"
+            "QPushButton:hover{background:#1e7e34;border-color:#1e7e34;}"
         )
         self.btn_close.setStyleSheet(
-            "QPushButton{background:#6c757d;color:#fff;padding:6px 14px;border-radius:6px;border:1px solid #6c757d;} QPushButton:hover{background:#545b62;border-color:#545b62;}"
+            "QPushButton{background:#6c757d;color:#fff;padding:6px 14px;border-radius:6px;border:1px solid #6c757d;}"
+            "QPushButton:hover{background:#545b62;border-color:#545b62;}"
         )
         self.btn_gen_click_region.setStyleSheet(
-            "QPushButton{background:#17a2b8;color:#fff;padding:6px 14px;border-radius:6px;border:1px solid #17a2b8;} QPushButton:hover{background:#138496;border-color:#138496;}"
+            "QPushButton{background:#17a2b8;color:#fff;padding:6px 14px;border-radius:6px;border:1px solid #17a2b8;}"
+            "QPushButton:hover{background:#138496;border-color:#138496;}"
         )
         self.btn_regen_circle.setStyleSheet(
-            "QPushButton{background:#17a2b8;color:#fff;padding:6px 14px;border-radius:6px;border:1px solid #17a2b8;} QPushButton:hover{background:#138496;border-color:#138496;}"
+            "QPushButton{background:#17a2b8;color:#fff;padding:6px 14px;border-radius:6px;border:1px solid #17a2b8;}"
+            "QPushButton:hover{background:#138496;border-color:#138496;}"
         )
         self.total_count.setStyleSheet("color:#333;font-weight:500;")
 
