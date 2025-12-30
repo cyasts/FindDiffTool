@@ -995,6 +995,13 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
             QtWidgets.QMessageBox.information(self, "提示", "当前修改尚未保存，请先保存后再进行AI处理。")
             return
 
+        current_count = len(self.differences)
+        if current_count == 0:
+            QtWidgets.QMessageBox.information(
+                self, "AI处理", f"当前茬点数为 {current_count}，请调整后重试。"
+            )
+            return
+
         targets: List[int] = []
         for idx, d in enumerate(self.differences, start=1):
             if d.enabled:
