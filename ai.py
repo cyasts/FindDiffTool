@@ -327,7 +327,7 @@ class AIWorker2(QtCore.QObject):
             completed_count = [0]  # 使用列表来在闭包中修改
 
             # 使用线程池并行处理
-            max_workers = min(4, len(self.target_indices))  # 限制最大线程数
+            max_workers = min(os.cpu_count(), len(self.target_indices))  # 限制最大线程数
             failed_indices = []
 
             with ThreadPoolExecutor(max_workers=max_workers) as executor:
