@@ -34,7 +34,8 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
         self.pair = pair
         self.config_dir = config_dir
         self.setWindowTitle(f"不同点编辑器 - {self.pair.name}")
-        self.resize(1600, 1080)
+        # self.resize(1600, 1080)
+        self.resize(1200, 960)
         self._add_btns = list()
         self.setAttribute(QtCore.Qt.WA_DeleteOnClose, True)
 
@@ -91,7 +92,7 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
         down_row.addLayout(down_left, 1)
         self.down_side = self._build_side_panel(section='down')
         down_row.addWidget(self.down_side, 0)
-        vbox_root.addLayout(down_row, 1)
+        # vbox_root.addLayout(down_row, 1)
 
         # Bottom toolbar
         bottom = QtWidgets.QWidget()
