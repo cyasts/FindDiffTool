@@ -4,7 +4,7 @@ from typing import List, Tuple
 
 from PySide6 import QtCore, QtGui
 
-import img_rc
+import img_rc as _
 from models import RADIUS_LEVELS, Difference
 
 QImage = QtGui.QImage
