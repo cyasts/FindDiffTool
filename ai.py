@@ -96,7 +96,12 @@ class AIWorker(QtCore.QObject):
     error = QtCore.Signal(str)
 
     def __init__(
-        self, level_dir: str, name: str, ext: str, differences: List[Difference], target_indices: List[int]
+        self,
+        level_dir: str,
+        name: str,
+        ext: str,
+        differences: List[Difference],
+        target_indices: List[int],
     ):
         super().__init__()
         self.level_dir = level_dir
@@ -104,7 +109,7 @@ class AIWorker(QtCore.QObject):
         self.differences = differences
         self.target_indices = target_indices
         self.ext = ext
-        self.origin_path = os.path.join(level_dir, f"A", f"{self.name}_origin{self.ext}")
+        self.origin_path = os.path.normpath(os.path.join(level_dir, f"A", f"{self.name}_origin{self.ext}"))
 
     def setClient(self, client: str, api: str) -> None:
         if client == "A8":
@@ -114,6 +119,7 @@ class AIWorker(QtCore.QObject):
 
     @QtCore.Slot()
     def run(self) -> None:
+        print(f"Worker run: {self.level_dir=}, {self.name=}, {self.origin_path=}")
         try:
             reader = QtGui.QImageReader(self.origin_path)
             reader.setAutoTransform(False)  # 与 _imread_any 保持一致
@@ -174,8 +180,11 @@ class AIWorker(QtCore.QObject):
 
                 # 直通 Alpha：避免预乘导致的整体泛灰
                 patch_feathered = _apply_alpha_straight(patch, alpha8)
-                final_path = os.path.join(self.level_dir, f"A", f"{self.name}_region{idx}.png")
+                final_path = os.path.normpath(
+                    os.path.join(self.level_dir, f"A", f"{self.name}_region{idx}.png")
+                )
                 patch_feathered.save(final_path)
+                print(f"Save patch image: {final_path=}")
 
                 step += 1
                 self.progressed.emit(step, total)

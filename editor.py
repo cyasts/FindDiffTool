@@ -981,6 +981,7 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
         self._ai_worker.setClient(client, api)
         self._ai_worker.moveToThread(self._ai_thread)
         self._ai_thread.started.connect(self._ai_worker.run)
+
         # Ensure slots execute on GUI thread
         self._ai_worker.progressed.connect(self._ai_slot_progress, QtCore.Qt.QueuedConnection)
         self._ai_worker.finished.connect(self._ai_slot_finished, QtCore.Qt.QueuedConnection)
@@ -1001,10 +1002,33 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
         if not targets:
             QtWidgets.QMessageBox.information(self, "AI处理", "未勾选茬点，请勾选要处理的茬点")
             return
+        self._update_status("aiPending")
 
+        # 在后台线程执行AI，并显示非阻塞进度对话框
         # 准备 origin 路径
         level_dir = self.level_dir()
         print(f"{level_dir=}")
+
+        # 状态栏进度
+        self._ai_progress_start(len(targets))
+
+        # 后台线程
+        self._ai_thread = QtCore.QThread(self)
+        client = self.client_combo.currentData()
+        self._ai_worker = AIWorker(level_dir, self.name, self.ext, self.differences, targets)
+        print(f"{self.differences=}")
+
+        api = self.api_combo.currentData()
+        self._ai_worker.setClient(client, api)
+        self._ai_worker.moveToThread(self._ai_thread)
+        self._ai_thread.started.connect(self._ai_worker.run)
+
+        # Ensure slots execute on GUI thread
+        self._ai_worker.progressed.connect(self._ai_slot_progress, QtCore.Qt.QueuedConnection)
+        self._ai_worker.finished.connect(self._ai_slot_finished, QtCore.Qt.QueuedConnection)
+        self._ai_worker.error.connect(self._ai_slot_error, QtCore.Qt.QueuedConnection)
+        self._ai_thread.finished.connect(self._ai_thread.deleteLater)
+        self._ai_thread.start()
 
     def on_level_changed(self, diff_id: str, new_level: int) -> None:
         """列表里切换 hint level（1..15）。更新 dataclass，并驱动场景图元重绘。"""
