@@ -8,7 +8,7 @@ from typing import Dict, List, Optional, Tuple
 
 from PySide6 import QtCore, QtGui, QtWidgets
 
-from ai import AIWorker
+from ai import AIWorker, AIWorker2
 from graphics import DifferenceItem
 from models import (
     CATEGORY_COLOR_MAP,
@@ -1015,7 +1015,7 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
         # 后台线程
         self._ai_thread = QtCore.QThread(self)
         client = self.client_combo.currentData()
-        self._ai_worker = AIWorker(level_dir, self.name, self.ext, self.differences, targets)
+        self._ai_worker = AIWorker2(level_dir, self.name, self.ext, self.differences, targets)
         print(f"{self.differences=}")
 
         api = self.api_combo.currentData()

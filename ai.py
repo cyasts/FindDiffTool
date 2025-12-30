@@ -197,3 +197,106 @@ class AIWorker(QtCore.QObject):
             self.finished.emit(failed)
         except Exception as exc:
             self.error.emit(str(exc))
+
+
+class AIWorker2(QtCore.QObject):
+    progressed = QtCore.Signal(int, int)  # step, total
+    finished = QtCore.Signal(list)  # failed indices
+    error = QtCore.Signal(str)
+
+    def __init__(
+        self,
+        level_dir: str,
+        name: str,
+        ext: str,
+        differences: List[Difference],
+        target_indices: List[int],
+    ):
+        super().__init__()
+        self.level_dir = level_dir
+        self.name = name
+        self.differences = differences
+        self.target_indices = target_indices
+        self.ext = ext
+        self.origin_path = os.path.normpath(os.path.join(level_dir, f"A", f"{self.name}_origin{self.ext}"))
+
+    def setClient(self, client: str, api: str) -> None:
+        if client == "A8":
+            self.client = A81ImageEditClient(api)
+        else:
+            self.client = GeminiImageEditClient()
+
+    @QtCore.Slot()
+    def run(self) -> None:
+        print(f"Worker run: {self.level_dir=}, {self.name=}, {self.origin_path=}")
+        try:
+            reader = QtGui.QImageReader(self.origin_path)
+            reader.setAutoTransform(False)  # 与 _imread_any 保持一致
+            img = reader.read()
+            if img.isNull():
+                raise RuntimeError("无法打开 origin 图像")
+
+            total = len(self.target_indices)
+            W, H = img.width(), img.height()
+            step = 0
+            for idx in self.target_indices:
+                self._process(H, W, idx, img)
+
+                step += 1
+                self.progressed.emit(step, total)
+
+            # compute failures: region files not present
+            failed = []
+            for idx in self.target_indices:
+                dst = os.path.join(self.level_dir, f"A", f"{self.name}_region{idx}.png")
+                if not os.path.isfile(dst):
+                    failed.append(idx)
+            self.finished.emit(failed)
+        except Exception as exc:
+            self.error.emit(str(exc))
+
+    def _process(self, H, W, idx, img):
+        print(f"开始处理: {idx=}")
+        d = self.differences[idx - 1]
+        l, t, w, h = quantize_roi(d.x, d.y, d.width, d.height, W, H)
+        rect = QtCore.QRect(l, t, w, h)
+        subimg = img.copy(rect)  # 裁剪原图
+        # 1) 输入图
+        canvas = QtGui.QImage(CANVAS_W, CANVAS_H, QtGui.QImage.Format_ARGB32)
+        canvas.fill(QtGui.QColor(255, 255, 255, 255))  # 外部为纯白不透明
+        ox = (CANVAS_W - w) // 2
+        oy = (CANVAS_H - h) // 2
+        p = QtGui.QPainter(canvas)
+        p.drawImage(ox, oy, subimg)  # ROI 贴中间
+        p.end()
+        buf = QtCore.QBuffer()
+        buf.open(QtCore.QIODevice.ReadWrite)
+        canvas.save(buf, "PNG")
+        png_bytes = bytes(buf.data())
+        buf.close()
+        # 2) 掩膜：外部不透明，ROI 清成透明
+        mask = QtGui.QImage(CANVAS_W, CANVAS_H, QtGui.QImage.Format_ARGB32)
+        mask.fill(QtGui.QColor(255, 255, 255, 255))
+        mp = QtGui.QPainter(mask)
+        mp.setCompositionMode(QtGui.QPainter.CompositionMode_Clear)
+        mp.fillRect(QtCore.QRect(ox, oy, w, h), QtCore.Qt.transparent)
+        mp.end()
+        bufm = QtCore.QBuffer()
+        bufm.open(QtCore.QIODevice.ReadWrite)
+        mask.save(bufm, "PNG")
+        mask_bytes = bytes(bufm.data())
+        bufm.close()
+        # 调试：保存看看
+        # QtGui.QImage.fromData(png_bytes).save(os.path.join(self.level_dir, "dbg_input.png"))
+        # QtGui.QImage.fromData(mask_bytes).save(os.path.join(self.level_dir, "dbg_mask.png"))
+        # 获取 AI 返回的图像字节
+        img_bytes = self.client.send_request(image_bytes=png_bytes, mask_bytes=mask_bytes, prompt=d.label)
+        patch = QtGui.QImage.fromData(img_bytes).copy(ox, oy, w, h)
+        # 羽化宽度：短边的 6%（可按需调整/做成参数）
+        feather_px = max(4, int(min(w, h) * 0.06))
+        alpha8 = _make_rect_feather_alpha8(w, h, feather_px)
+        # 直通 Alpha：避免预乘导致的整体泛灰
+        patch_feathered = _apply_alpha_straight(patch, alpha8)
+        final_path = os.path.normpath(os.path.join(self.level_dir, f"A", f"{self.name}_region{idx}.png"))
+        patch_feathered.save(final_path)
+        print(f"Save patch image: {final_path=}")
