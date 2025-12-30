@@ -1,11 +1,24 @@
 import os
+import threading
+from concurrent.futures import (
+    ThreadPoolExecutor,
+    as_completed,
+)
 from typing import List
+
 from PySide6 import QtCore, QtGui
 
-from models import Difference, CANVAS_W, CANVAS_H
+from ai_client import (
+    A81ImageEditClient,
+    GeminiImageEditClient,
+)
+from models import (
+    CANVAS_H,
+    CANVAS_W,
+    Difference,
+)
 from utils import quantize_roi
 
-from ai_client import A81ImageEditClient, GeminiImageEditClient
 
 def _make_rect_feather_alpha8(w: int, h: int, f: int) -> QtGui.QImage:
     """生成矩形四周羽化的 Alpha8 掩膜，中心=255，边缘渐变到0"""
@@ -17,7 +30,7 @@ def _make_rect_feather_alpha8(w: int, h: int, f: int) -> QtGui.QImage:
     p.setPen(QtCore.Qt.NoPen)
 
     # 中心不透明
-    inner = QtCore.QRect(f, f, max(0, w - 2*f), max(0, h - 2*f))
+    inner = QtCore.QRect(f, f, max(0, w - 2 * f), max(0, h - 2 * f))
     if inner.width() > 0 and inner.height() > 0:
         p.fillRect(inner, QtGui.QColor(0, 0, 0, 255))
 
@@ -49,7 +62,7 @@ def _make_rect_feather_alpha8(w: int, h: int, f: int) -> QtGui.QImage:
         rg.setColorAt(0.0, QtGui.QColor(0, 0, 0, 255))
         rg.setColorAt(1.0, QtGui.QColor(0, 0, 0, 0))
         p.setBrush(QtGui.QBrush(rg))
-        p.drawEllipse(QtCore.QRect(cx - f, cy - f, 2*f, 2*f))
+        p.drawEllipse(QtCore.QRect(cx - f, cy - f, 2 * f, 2 * f))
 
     p.end()
     return alpha
@@ -74,26 +87,34 @@ def _apply_alpha_straight(patch: QtGui.QImage, alpha8: QtGui.QImage) -> QtGui.QI
         arow = bytes(a_ptr)
         # 每4字节一像素，把第4个字节(索引3)替换为 alpha
         for x in range(w):
-            row[4*x + 3] = arow[x]
+            row[4 * x + 3] = arow[x]
         # 回写
         mv = memoryview(px)
-        mv[:len(row)] = row
+        mv[: len(row)] = row
 
     return out
 
+
 class AIWorker(QtCore.QObject):
     progressed = QtCore.Signal(int, int)  # step, total
-    finished = QtCore.Signal(list)        # failed indices
+    finished = QtCore.Signal(list)  # failed indices
     error = QtCore.Signal(str)
 
-    def __init__(self, level_dir: str, name: str, ext: str, differences: List[Difference], target_indices: List[int]):
+    def __init__(
+        self,
+        level_dir: str,
+        name: str,
+        ext: str,
+        differences: List[Difference],
+        target_indices: List[int],
+    ):
         super().__init__()
         self.level_dir = level_dir
         self.name = name
         self.differences = differences
         self.target_indices = target_indices
         self.ext = ext
-        self.origin_path = os.path.join(level_dir, f"A", f"{self.name}_origin{self.ext}")
+        self.origin_path = os.path.normpath(os.path.join(level_dir, f"A", f"{self.name}_origin{self.ext}"))
 
     def setClient(self, client: str, api: str) -> None:
         if client == "A8":
@@ -103,12 +124,13 @@ class AIWorker(QtCore.QObject):
 
     @QtCore.Slot()
     def run(self) -> None:
+        print(f"Worker run: {self.level_dir=}, {self.name=}, {self.origin_path=}")
         try:
             reader = QtGui.QImageReader(self.origin_path)
             reader.setAutoTransform(False)  # 与 _imread_any 保持一致
             img = reader.read()
             if img.isNull():
-                raise RuntimeError('无法打开 origin 图像')
+                raise RuntimeError("无法打开 origin 图像")
 
             total = len(self.target_indices)
             W, H = img.width(), img.height()
@@ -121,33 +143,41 @@ class AIWorker(QtCore.QObject):
 
                 # 1) 输入图
                 canvas = QtGui.QImage(CANVAS_W, CANVAS_H, QtGui.QImage.Format_ARGB32)
-                canvas.fill(QtGui.QColor(255,255,255,255))             # 外部为纯白不透明
+                canvas.fill(QtGui.QColor(255, 255, 255, 255))  # 外部为纯白不透明
                 ox = (CANVAS_W - w) // 2
                 oy = (CANVAS_H - h) // 2
                 p = QtGui.QPainter(canvas)
-                p.drawImage(ox, oy, subimg)                            # ROI 贴中间
+                p.drawImage(ox, oy, subimg)  # ROI 贴中间
                 p.end()
 
-                buf = QtCore.QBuffer(); buf.open(QtCore.QIODevice.ReadWrite)
-                canvas.save(buf, "PNG"); png_bytes = bytes(buf.data()); buf.close()
+                buf = QtCore.QBuffer()
+                buf.open(QtCore.QIODevice.ReadWrite)
+                canvas.save(buf, "PNG")
+                png_bytes = bytes(buf.data())
+                buf.close()
 
                 # 2) 掩膜：外部不透明，ROI 清成透明
                 mask = QtGui.QImage(CANVAS_W, CANVAS_H, QtGui.QImage.Format_ARGB32)
-                mask.fill(QtGui.QColor(255,255,255,255))
+                mask.fill(QtGui.QColor(255, 255, 255, 255))
                 mp = QtGui.QPainter(mask)
                 mp.setCompositionMode(QtGui.QPainter.CompositionMode_Clear)
                 mp.fillRect(QtCore.QRect(ox, oy, w, h), QtCore.Qt.transparent)
                 mp.end()
 
-                bufm = QtCore.QBuffer(); bufm.open(QtCore.QIODevice.ReadWrite)
-                mask.save(bufm, "PNG"); mask_bytes = bytes(bufm.data()); bufm.close()
+                bufm = QtCore.QBuffer()
+                bufm.open(QtCore.QIODevice.ReadWrite)
+                mask.save(bufm, "PNG")
+                mask_bytes = bytes(bufm.data())
+                bufm.close()
 
                 # 调试：保存看看
                 # QtGui.QImage.fromData(png_bytes).save(os.path.join(self.level_dir, "dbg_input.png"))
                 # QtGui.QImage.fromData(mask_bytes).save(os.path.join(self.level_dir, "dbg_mask.png"))
 
                 # 获取 AI 返回的图像字节
-                img_bytes = self.client.send_request(image_bytes=png_bytes, mask_bytes=mask_bytes, prompt=d.label)
+                img_bytes = self.client.send_request(
+                    image_bytes=png_bytes, mask_bytes=mask_bytes, prompt=d.label
+                )
                 patch = QtGui.QImage.fromData(img_bytes).copy(ox, oy, w, h)
                 # 羽化宽度：短边的 6%（可按需调整/做成参数）
                 feather_px = max(4, int(min(w, h) * 0.06))
@@ -155,8 +185,11 @@ class AIWorker(QtCore.QObject):
 
                 # 直通 Alpha：避免预乘导致的整体泛灰
                 patch_feathered = _apply_alpha_straight(patch, alpha8)
-                final_path = os.path.join(self.level_dir, f"A", f"{self.name}_region{idx}.png")
+                final_path = os.path.normpath(
+                    os.path.join(self.level_dir, f"A", f"{self.name}_region{idx}.png")
+                )
                 patch_feathered.save(final_path)
+                print(f"Save patch image: {final_path=}")
 
                 step += 1
                 self.progressed.emit(step, total)
@@ -167,5 +200,168 @@ class AIWorker(QtCore.QObject):
                 if not os.path.isfile(dst):
                     failed.append(idx)
             self.finished.emit(failed)
+        except Exception as exc:
+            self.error.emit(str(exc))
+
+
+class AIWorker2(QtCore.QObject):
+    progressed = QtCore.Signal(int, int)  # step, total
+    finished = QtCore.Signal(list)  # failed indices
+    error = QtCore.Signal(str)
+
+    def __init__(
+        self,
+        level_dir: str,
+        name: str,
+        ext: str,
+        differences: List[Difference],
+        target_indices: List[int],
+    ):
+        super().__init__()
+        self.level_dir = level_dir
+        self.name = name
+        self.differences = differences
+        self.target_indices = target_indices
+        self.ext = ext
+        self.origin_path = os.path.normpath(os.path.join(level_dir, f"A", f"{self.name}_origin{self.ext}"))
+
+    def setClient(self, client: str, api: str) -> None:
+        if client == "A8":
+            self.client = A81ImageEditClient(api)
+        else:
+            self.client = GeminiImageEditClient()
+
+    def _process_region(
+        self,
+        idx: int,
+        img: QtGui.QImage,
+        W: int,
+        H: int,
+        progress_lock: threading.Lock,
+        completed_count: List[int],
+        total_count: int,
+    ) -> tuple[int, str | None]:
+        """成员方法用于并行处理单个区域"""
+        with progress_lock:
+            print(f"开始处理: {idx=}")
+
+        try:
+            d = self.differences[idx - 1]
+            l, t, w, h = quantize_roi(d.x, d.y, d.width, d.height, W, H)
+            rect = QtCore.QRect(l, t, w, h)
+            subimg = img.copy(rect)  # 裁剪原图
+
+            # 1) 输入图
+            canvas = QtGui.QImage(CANVAS_W, CANVAS_H, QtGui.QImage.Format_ARGB32)
+            canvas.fill(QtGui.QColor(255, 255, 255, 255))  # 外部为纯白不透明
+            ox = (CANVAS_W - w) // 2
+            oy = (CANVAS_H - h) // 2
+            p = QtGui.QPainter(canvas)
+            p.drawImage(ox, oy, subimg)  # ROI 贴中间
+            p.end()
+            buf = QtCore.QBuffer()
+            buf.open(QtCore.QIODevice.ReadWrite)
+            canvas.save(buf, "PNG")
+            png_bytes = bytes(buf.data())
+            buf.close()
+
+            # 2) 掩膜：外部不透明，ROI 清成透明
+            mask = QtGui.QImage(CANVAS_W, CANVAS_H, QtGui.QImage.Format_ARGB32)
+            mask.fill(QtGui.QColor(255, 255, 255, 255))
+            mp = QtGui.QPainter(mask)
+            mp.setCompositionMode(QtGui.QPainter.CompositionMode_Clear)
+            mp.fillRect(QtCore.QRect(ox, oy, w, h), QtCore.Qt.transparent)
+            mp.end()
+            bufm = QtCore.QBuffer()
+            bufm.open(QtCore.QIODevice.ReadWrite)
+            mask.save(bufm, "PNG")
+            mask_bytes = bytes(bufm.data())
+            bufm.close()
+
+            # 获取 AI 返回的图像字节
+            img_bytes = self.client.send_request(
+                image_bytes=png_bytes, mask_bytes=mask_bytes, prompt=d.label
+            )
+            patch = QtGui.QImage.fromData(img_bytes).copy(ox, oy, w, h)
+
+            # 羽化宽度：短边的 6%（可按需调整/做成参数）
+            feather_px = max(4, int(min(w, h) * 0.06))
+            alpha8 = _make_rect_feather_alpha8(w, h, feather_px)
+
+            # 直通 Alpha：避免预乘导致的整体泛灰
+            patch_feathered = _apply_alpha_straight(patch, alpha8)
+            final_path = os.path.normpath(
+                os.path.join(self.level_dir, f"A", f"{self.name}_region{idx}.png")
+            )
+            patch_feathered.save(final_path)
+
+            with progress_lock:
+                completed_count[0] += 1
+                print(f"Save patch image: {final_path=}")
+                print(f"进度: {completed_count[0]}/{total_count}")
+
+            return idx, None  # 成功
+
+        except Exception as e:
+            with progress_lock:
+                completed_count[0] += 1
+                print(f"处理区域 {idx} 失败: {str(e)}")
+
+            return idx, str(e)  # 失败
+
+    @QtCore.Slot()
+    def run(self) -> None:
+        print(f"Worker run: {self.level_dir=}, {self.name=}, {self.origin_path=}")
+        try:
+            reader = QtGui.QImageReader(self.origin_path)
+            reader.setAutoTransform(False)  # 与 _imread_any 保持一致
+            img = reader.read()
+            if img.isNull():
+                raise RuntimeError("无法打开 origin 图像")
+
+            total = len(self.target_indices)
+            W, H = img.width(), img.height()
+
+            # 准备并行处理的参数
+            progress_lock = threading.Lock()
+            completed_count = [0]  # 使用列表来在闭包中修改
+
+            # 使用线程池并行处理
+            max_workers = min(4, len(self.target_indices))  # 限制最大线程数
+            failed_indices = []
+
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                # 提交所有任务
+                future_to_idx = {
+                    executor.submit(
+                        self._process_region, idx, img, W, H, progress_lock, completed_count, total
+                    ): idx
+                    for idx in self.target_indices
+                }
+
+                # 处理完成的任务
+                for future in as_completed(future_to_idx):
+                    idx = future_to_idx[future]
+                    try:
+                        result_idx, error = future.result()
+                        if error:
+                            failed_indices.append(result_idx)
+                    except Exception as e:
+                        print(f"处理区域 {idx} 时发生异常: {str(e)}")
+                        failed_indices.append(idx)
+
+                    # 更新进度（线程安全）
+                    with progress_lock:
+                        self.progressed.emit(completed_count[0], total)
+
+            # 如果没有失败，验证文件是否存在
+            if not failed_indices:
+                failed_indices = []
+                for idx in self.target_indices:
+                    dst = os.path.join(self.level_dir, f"A", f"{self.name}_region{idx}.png")
+                    if not os.path.isfile(dst):
+                        failed_indices.append(idx)
+
+            self.finished.emit(failed_indices)
         except Exception as exc:
             self.error.emit(str(exc))

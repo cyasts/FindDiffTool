@@ -1,0 +1,45 @@
+[project]
+name = "find-the-cat"
+version = "0.0.2"
+description = "Find the cat"
+readme = "readme.org"
+requires-python = ">=3.13"
+dependencies = [
+    "google-genai>=1.56.0",
+    "httpx[socks]>=0.28.1",
+    "pyside6>=6.10.1",
+    "requests>=2.32.5",
+]
+
+[tool.ruff]
+line-length = 108
+# lint.ignore = ["E402", "F401", "F821"]
+
+[tool.ruff.lint.per-file-ignores]
+"__init__.py" = ["F401", "E402"]
+
+[[tool.uv.index]]
+url = "https://mirrors.aliyun.com/pypi/simple/"
+
+[tool.black]
+line-length = 108
+target-version = ['py313']
+
+[tool.isort]
+multi_line_output = 3
+include_trailing_comma = true
+force_grid_wrap = 0
+use_parentheses = true
+line_length = 48
+
+[tool.autoflake]
+remove_all_unused_imports = true
+ignore_init_module_imports = true
+
+[dependency-groups]
+dev = [
+    "autoflake>=2.3.1",
+    "black>=25.9.0",
+    "isort>=7.0.0",
+    "ruff>=0.14.1",
+]

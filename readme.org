@@ -1,0 +1,13 @@
+#+TITLE: FindTheCat
+#+AUTHOR: Jinghui Hu
+#+EMAIL: hujinghui@buaa.edu.cn
+#+DATE: <2025-12-30 Tue>
+#+STARTUP: overview num indent
+#+OPTIONS: ^:nil
+
+
+* 快速开发
+运行项目
+#+BEGIN_SRC sh
+  uv run main.py
+#+END_SRC

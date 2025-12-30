@@ -4,10 +4,11 @@ from dataclasses import dataclass
 from typing import List, Optional
 
 from PySide6 import QtCore, QtGui, QtWidgets
-from editor import DifferenceEditorWindow
-from circle_provider import CirclePixmapProvider
 
-IMAGE_EXTENSIONS = {'.png', '.jpg', '.jpeg', '.bmp', '.gif'}
+from circle_provider import CirclePixmapProvider
+from editor import DifferenceEditorWindow
+
+IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".bmp", ".gif"}
 
 
 @dataclass
@@ -24,9 +25,7 @@ class ImageCard(QtWidgets.QFrame):
         super().__init__(parent)
         self.pair = pair
         self.setFrameShape(QtWidgets.QFrame.StyledPanel)
-        self.setStyleSheet(
-            "QFrame { background: white; border-radius: 8px; border: 1px solid #eee; }"
-        )
+        self.setStyleSheet("QFrame { background: white; border-radius: 8px; border: 1px solid #eee; }")
         # fixed, compact card size to fit 4 columns (image 240x150 + title 40)
         self.setFixedSize(240, 190)
         self.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Fixed)
@@ -44,16 +43,16 @@ class ImageCard(QtWidgets.QFrame):
         image_label.setStyleSheet("border-top-left-radius: 8px; border-top-right-radius: 8px;")
         pixmap = QtGui.QPixmap(self.pair.image_path)
         if not pixmap.isNull():
-            image_label.setPixmap(pixmap.scaled(image_label.size(), QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation))
+            image_label.setPixmap(
+                pixmap.scaled(image_label.size(), QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation)
+            )
         layout.addWidget(image_label)
 
         # Title
         title = QtWidgets.QLabel(self.pair.name, self)
         title.setAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter)
         title.setFixedHeight(40)
-        title.setStyleSheet(
-            "padding: 0 12px; font-weight: 600; color: #333; border-top: 1px solid #eee;"
-        )
+        title.setStyleSheet("padding: 0 12px; font-weight: 600; color: #333; border-top: 1px solid #eee;")
         layout.addWidget(title)
 
     def mouseReleaseEvent(self, event: QtGui.QMouseEvent) -> None:
@@ -90,7 +89,7 @@ class FlowGrid(QtWidgets.QScrollArea):
                 w.setParent(None)
 
         if not cards:
-            empty = QtWidgets.QLabel("暂无图片\n请点击\"加载图片\"按钮选择包含图片资源的文件夹")
+            empty = QtWidgets.QLabel('暂无图片\n请点击"加载图片"按钮选择包含图片资源的文件夹')
             empty.setAlignment(QtCore.Qt.AlignCenter)
             empty.setStyleSheet("color:#666; padding: 60px 20px;")
             self.grid.addWidget(empty, 0, 0)
@@ -148,10 +147,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.header_layout = header_layout
 
         self.title_label = QtWidgets.QLabel("找不同游戏关卡编辑器")
-        self._title_full = self.title_label.text()           # ✅ 记住原文
+        self._title_full = self.title_label.text()  # ✅ 记住原文
         self.title_label.setWordWrap(False)
         self.title_label.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Fixed)
-        self.title_label.setMinimumWidth(220)                 # ✅ 给一个最小宽度，避免被压没
+        self.title_label.setMinimumWidth(220)  # ✅ 给一个最小宽度，避免被压没
         self.title_label.setStyleSheet("font-size:20px; font-weight:700; color:#333;")
 
         header_layout.addWidget(self.title_label)
@@ -177,13 +176,17 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # Config directory persistent display
         self.config_dir_label = QtWidgets.QLabel()
-        self.config_dir_label.setStyleSheet("background:#f8f9fa; padding:6px 10px; border:1px solid #eee; border-radius:4px; font-size:12px; color:#333;")
+        self.config_dir_label.setStyleSheet(
+            "background:#f8f9fa; padding:6px 10px; border:1px solid #eee; border-radius:4px; font-size:12px; color:#333;"
+        )
         self.config_dir_label.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
         vbox.addWidget(self.config_dir_label, 0)
 
         # Status bar like label
         self.status_label = QtWidgets.QLabel()
-        self.status_label.setStyleSheet("background:#e9ecef; padding:8px 10px; border-radius:4px; font-size:13px;")
+        self.status_label.setStyleSheet(
+            "background:#e9ecef; padding:8px 10px; border-radius:4px; font-size:13px;"
+        )
         vbox.addWidget(self.status_label, 0)
 
         # Image grid
@@ -313,7 +316,9 @@ class MainWindow(QtWidgets.QMainWindow):
         if not hasattr(self, "_open_editors"):
             self._open_editors = []
         self._open_editors.append(win)
-        win.destroyed.connect(lambda *_: self._open_editors.remove(win) if win in self._open_editors else None)
+        win.destroyed.connect(
+            lambda *_: self._open_editors.remove(win) if win in self._open_editors else None
+        )
         win.show()
 
     def closeEvent(self, event: QtGui.QCloseEvent) -> None:
@@ -324,7 +329,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 "确认退出",
                 f"有 {len(dirty_editors)} 个编辑器尚未保存，是否要全部关闭？",
                 QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.Cancel,
-                QtWidgets.QMessageBox.Cancel
+                QtWidgets.QMessageBox.Cancel,
             )
             if ret != QtWidgets.QMessageBox.Yes:
                 event.ignore()
@@ -336,6 +341,7 @@ class MainWindow(QtWidgets.QMainWindow):
             except Exception:
                 pass
         event.accept()
+
 
 def main() -> int:
     app = QtWidgets.QApplication(sys.argv)
@@ -349,5 +355,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
-
-
