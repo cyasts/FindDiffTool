@@ -1,6 +1,6 @@
 [project]
 name = "find-the-cat"
-version = "0.0.3"
+version = "0.0.4"
 description = "Find the cat"
 readme = "readme.org"
 requires-python = ">=3.13"
