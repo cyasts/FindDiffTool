@@ -11,6 +11,7 @@ MIN_RECT_SIZE: float = 110
 CANVAS_W, CANVAS_H = 1024, 1024  # 4:3
 
 CATEGORY_COLOR_MAP: Dict[str, QtGui.QColor] = {
+    "增加茬点": QtGui.QColor("#ff7f50"),
     "情感": QtGui.QColor("#ff7f50"),
     "颜色": QtGui.QColor("#28a745"),
     "增强": QtGui.QColor("#6f42c1"),

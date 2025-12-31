@@ -425,7 +425,8 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
         # tag buttons
         tag_grid = QtWidgets.QGridLayout()
         tag_grid.setSpacing(6)
-        tags = ["情感", "颜色", "增强", "置换", "修改"]
+        # tags = ["情感", "颜色", "增强", "置换", "修改"]
+        tags = ["增加茬点"]
         for i, tag in enumerate(tags):
             btn = QtWidgets.QPushButton(tag)
             btn.setObjectName(f"tag_{tag}")
