@@ -468,7 +468,7 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
             name=f"不同点 {len(self.differences) + 1}",
             section=section,
             category=category or "",
-            label="",
+            label="把猫变成橘黄色",
             enabled=True,
             visible=True,
             x=rect.x(),
