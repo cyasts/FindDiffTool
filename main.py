@@ -4,8 +4,7 @@ from dataclasses import dataclass
 from typing import List, Optional
 
 from PySide6 import QtCore, QtGui, QtWidgets
-from editor import DifferenceEditorWindow
-from circle_provider import CirclePixmapProvider
+from editor import EditorWindow
 
 IMAGE_EXTENSIONS = {'.png', '.jpg', '.jpeg', '.bmp', '.gif'}
 
@@ -26,11 +25,9 @@ class ImageCard(QtWidgets.QFrame):
     def __init__(self, pair: ImagePair, parent: Optional[QtWidgets.QWidget] = None) -> None:
         super().__init__(parent)
         self.pair = pair
-        self.setFrameShape(QtWidgets.QFrame.StyledPanel)
         self.setStyleSheet(
-            "QFrame { background: white; border-radius: 8px; border: 1px solid #eee; }"
+            "QFrame { background: white;}"
         )
-        # fixed, compact card size to fit 4 columns (image 240x150 + title 40)
         self.setFixedSize(240, 190)
         self.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Fixed)
 
@@ -44,18 +41,24 @@ class ImageCard(QtWidgets.QFrame):
         image_label = QtWidgets.QLabel(self)
         image_label.setFixedSize(240, 150)
         image_label.setAlignment(QtCore.Qt.AlignCenter)
-        image_label.setStyleSheet("border-top-left-radius: 8px; border-top-right-radius: 8px;")
+        # image_label.setStyleSheet("border-top-left-radius: 8px; border-top-right-radius: 8px;")
+        image_label.setStyleSheet("background:white;")
         pixmap = QtGui.QPixmap(self.pair.image_path_a)
         if not pixmap.isNull():
             image_label.setPixmap(pixmap.scaled(image_label.size(), QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation))
+            pixmap.scaled(
+                image_label.size(),
+                QtCore.Qt.KeepAspectRatio,
+                QtCore.Qt.FastTransformation
+            )
         layout.addWidget(image_label)
 
         # Title
         title = QtWidgets.QLabel(self.pair.name, self)
-        title.setAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter)
-        title.setFixedHeight(40)
+        title.setAlignment(QtCore.Qt.AlignHCenter | QtCore.Qt.AlignVCenter)
+        title.setFixedHeight(20)
         title.setStyleSheet(
-            "padding: 0 12px; font-weight: 600; color: #333; border-top: 1px solid #eee;"
+            "padding: 0 12px; font-weight: 600; color: #333;"
         )
         layout.addWidget(title)
 
@@ -72,18 +75,15 @@ class FlowGrid(QtWidgets.QScrollArea):
         self.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
         self.cols = 4
         self.card_width = 240
+        self.margin = 10
         self.container = QtWidgets.QWidget()
-        self.vbox = QtWidgets.QVBoxLayout(self.container)
-        self.vbox.setContentsMargins(0, 0, 0, 0)
-        self.vbox.setSpacing(16)
-        self.setWidget(self.container)
-
-        self.grid = QtWidgets.QGridLayout()
-        self.grid.setContentsMargins(0, 0, 0, 0)
+        self.grid = QtWidgets.QGridLayout(self.container)
+        self.grid.setContentsMargins(self.margin, self.margin, self.margin, self.margin)
         self.grid.setHorizontalSpacing(16)
         self.grid.setVerticalSpacing(16)
         self.grid.setAlignment(QtCore.Qt.AlignTop)
-        self.vbox.addLayout(self.grid)
+
+        self.setWidget(self.container)
 
     def set_cards(self, cards: List[ImageCard]) -> None:
         while self.grid.count():
@@ -121,16 +121,16 @@ class FlowGrid(QtWidgets.QScrollArea):
         remaining = max(0, vw - total_cards)
         gap = max(min_gap, remaining // (self.cols + 1))
         self.grid.setHorizontalSpacing(gap)
-        self.grid.setContentsMargins(gap, 0, gap, 0)
+        self.grid.setContentsMargins(gap, self.margin, gap, 0)
 
 
 class MainWindow(QtWidgets.QMainWindow):
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle("找不同游戏关卡编辑器")
+        self.setWindowTitle("找猫游戏关卡编辑器")
         self.resize(1100, 760)
 
-        self.settings = QtCore.QSettings("FindDifferenceEditor", "PySideApp")
+        self.settings = QtCore.QSettings("FindCatsTool", "PySideApp")
         self.config_dir: str = self.settings.value("configDir", "", type=str)
         self.image_dir: str = self.settings.value("imageDir", "", type=str)
 
@@ -150,11 +150,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.header = header  # 保存引用，后面算宽度要用
         self.header_layout = header_layout
 
-        self.title_label = QtWidgets.QLabel("找不同游戏关卡编辑器")
-        self._title_full = self.title_label.text()           # ✅ 记住原文
+        self.title_label = QtWidgets.QLabel("找猫游戏关卡编辑器")
         self.title_label.setWordWrap(False)
         self.title_label.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Fixed)
-        self.title_label.setMinimumWidth(220)                 # ✅ 给一个最小宽度，避免被压没
+        self.title_label.setMinimumWidth(220)
         self.title_label.setStyleSheet("font-size:20px; font-weight:700; color:#333;")
 
         header_layout.addWidget(self.title_label)
@@ -332,7 +331,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.set_status(f"打开失败：{reason.replace(os.linesep, ' ')}")
             return
 
-        win = DifferenceEditorWindow(pair=pair, config_dir=self.config_dir, parent=None)
+        win = EditorWindow(pair=pair, config_dir=self.config_dir, parent=None)
         # keep a reference to avoid immediate GC when parented
         if not hasattr(self, "_open_editors"):
             self._open_editors = []
@@ -366,7 +365,6 @@ def main() -> int:
     app.setOrganizationName("FindDifferenceEditor")
     app.setApplicationName("PySideApp")
     w = MainWindow()
-    CirclePixmapProvider.instance().preload_base()
     w.show()
     return app.exec()
 
