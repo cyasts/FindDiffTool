@@ -5,6 +5,7 @@ from typing import List, Optional
 
 from PySide6 import QtCore, QtGui, QtWidgets
 from editor import EditorWindow
+from version import version
 
 IMAGE_EXTENSIONS = {'.png', '.jpg', '.jpeg', '.bmp', '.gif'}
 
@@ -127,7 +128,7 @@ class FlowGrid(QtWidgets.QScrollArea):
 class MainWindow(QtWidgets.QMainWindow):
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle("找猫游戏关卡编辑器")
+        self.setWindowTitle(f"找猫游戏关卡编辑器 [v{version}]")
         self.resize(1100, 760)
 
         self.settings = QtCore.QSettings("FindCatsTool", "PySideApp")

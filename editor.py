@@ -4,6 +4,7 @@ from typing import Dict, List, Optional, Tuple
 from PySide6 import QtCore, QtGui, QtWidgets
 
 from utils import compose_result, quantize_roi
+from version import version
 from models import Cat, MIN_RECT_SIZE
 from scenes import ImageScene, ImageView
 from graphics import CatItem
@@ -16,7 +17,7 @@ class EditorWindow(QtWidgets.QMainWindow):
         super().__init__(parent)
         self.pair = pair
         self.config_dir = config_dir
-        self.setWindowTitle(f"不同点编辑器 - {self.pair.name}")
+        self.setWindowTitle(f"不同点编辑器 - {self.pair.name} [v{version}]")
         self.resize(1600, 1080)
         self._add_btns = list()
         self.setAttribute(QtCore.Qt.WA_DeleteOnClose, True)
@@ -159,7 +160,7 @@ class EditorWindow(QtWidgets.QMainWindow):
 
     def _update_window_title(self) -> None:
         mark = "*" if getattr(self, '_is_dirty', False) else ""
-        self.setWindowTitle(f"找猫编辑器 - {self.pair.name}{mark}")
+        self.setWindowTitle(f"找猫编辑器 - {self.pair.name} [v{version}]{mark}")
 
     def _make_dirty(self) -> None:
         self._is_dirty = True
@@ -401,8 +402,10 @@ class EditorWindow(QtWidgets.QMainWindow):
         u = self.rect_items_up.get(cat.id)
         d = self.rect_items_down.get(cat.id)
         if u:
+            u.setFlag(QtWidgets.QGraphicsItem.ItemIsMovable, bool(cat.enabled))
             u.update()
         if d:
+            d.setFlag(QtWidgets.QGraphicsItem.ItemIsMovable, bool(cat.enabled))
             d.update()
         self._make_dirty()
         self.update_total_count()
@@ -508,12 +511,12 @@ class EditorWindow(QtWidgets.QMainWindow):
         if not self.cats:
             QtWidgets.QMessageBox.information(self, "提示", "当前没有可用的茬点，请先添加茬点。")
             return
-        allowed_counts = {15, 20, 25, 30, 35}
+        allowed_counts = {25, 30, 35, 40, 50}
         if len(self.cats) not in allowed_counts:
             QtWidgets.QMessageBox.information(
                 self,
                 "提示",
-                f"当前茬点数为 {len(self.cats)}，仅支持 15、20、25、30、35 个，请调整后再生成。"
+                f"当前茬点数为 {len(self.cats)}，仅支持 25、30、35、40、50 个，请调整后再生成。"
             )
             return
         progress = QtWidgets.QProgressDialog("正在生成，请稍候...", None, 0, 0, self)
@@ -724,7 +727,7 @@ class EditorWindow(QtWidgets.QMainWindow):
             return (1.0 - py) * h
 
         self._clear_all_items()
-        self._update_status(cfg.get('status', "unsaved"))
+        self._update_status(cfg.get('status', "saved"))
         self.cats.clear()
         for cat in cfg.get('differences', []):
             points = cat.get('points', [])
@@ -779,6 +782,8 @@ class EditorWindow(QtWidgets.QMainWindow):
 
         self.rebuild_lists()
         self.update_total_count()
+        self._is_dirty = False
+        self._update_window_title()
 
 
     def _update_ordinals(self) -> None:

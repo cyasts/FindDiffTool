@@ -244,9 +244,8 @@ class CatItem(QtWidgets.QGraphicsObject):
         # 矩形
         if self._show_rect:
             rect = self._current_rect_local()
-            p.setPen(self.PEN_RECT if not self._hl_rect else self.PEN_RECT_HL)
-            p.setBrush(self.BRUSH_RECT if not self._hl_rect else self.BRUSH_RECT_HL)
-            pen = self.PEN_RECT;    base_brush = self.BRUSH_RECT
+            pen = self.PEN_RECT_HL if self._hl_rect else self.PEN_RECT
+            base_brush = self.BRUSH_RECT_HL if self._hl_rect else self.BRUSH_RECT
             p.setPen(pen)
             col = QtGui.QColor(base_brush.color())
             if self._extern_selected:
@@ -381,8 +380,8 @@ class CatItem(QtWidgets.QGraphicsObject):
                 return
 
         # 矩形
-        # 角优先
         if self._can_hit_rect():
+            # 角优先
             corner = self._hit_corner(rect, pos)
             if corner >= 0:
                 self.setCursor(QtCore.Qt.SizeFDiagCursor if corner in (0, 2) else QtCore.Qt.SizeBDiagCursor)
@@ -403,6 +402,7 @@ class CatItem(QtWidgets.QGraphicsObject):
                 return
 
         # self.setCursor(QtCore.Qt.OpenHandCursor)
+        self.setCursor(QtCore.Qt.ArrowCursor)
         self._set_hover_state(rect_hl=False, click_hl=False)
         super().hoverMoveEvent(e)
 

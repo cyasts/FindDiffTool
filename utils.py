@@ -39,6 +39,7 @@ def compose_result(level_dir: str, name: str, ext: str, cats: List[Cat], margin:
     result = _compose_two_grid(up_img, down_img)
 
     result.save(os.path.join(level_dir, "B", "apreview.png"))
+    return result
 
 def _render_regions_to_origin(base: QtGui.QImage, cats: List[Cat], level_dir: str, name: str) -> Tuple[QImage, QImage]:
     up_img = _to_premultiplied(base).copy()

@@ -14,6 +14,8 @@ class ImageView(QtWidgets.QGraphicsView):
         # 默认不使用手型拖拽，保持箭头光标
         self.setDragMode(QtWidgets.QGraphicsView.NoDrag)
         self.viewport().setCursor(QtCore.Qt.ArrowCursor)
+        self.setMouseTracking(True)
+        self.viewport().setMouseTracking(True)
         self.setViewportUpdateMode(QtWidgets.QGraphicsView.SmartViewportUpdate)
 
     def resizeEvent(self, event: QtGui.QResizeEvent) -> None:
