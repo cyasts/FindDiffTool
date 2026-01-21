@@ -3,160 +3,16 @@ from __future__ import annotations
 
 from PySide6 import QtCore, QtGui, QtWidgets
 from typing import Optional, Dict, Tuple
+import weakref
 
 # 由你的工程提供
-from models import Difference, RADIUS_LEVELS, MIN_RECT_SIZE
-from circle_provider import CirclePixmapProvider
-
-# ==============================================================
-# 1) Model：作为唯一真源（SSOT），负责自动维护 hint_level
-# ==============================================================
-
-class DifferenceModel(QtCore.QObject):
-    """把 dataclass Difference 包一层，用 Qt 信号广播变更；并在 set_rect 时自动维护 hint_level。"""
-    geometryChanged = QtCore.Signal(object)  # source
-    circleChanged   = QtCore.Signal(object)  # source
-    anyChanged      = QtCore.Signal(object)  # source
-
-    def __init__(self, d: Difference):
-        super().__init__()
-        self.data = d
-        self._updating = False  # 批量/重入保护
-
-        self.set_rect(d.x, d.y, d.width, d.height, source=self, force=True)
-
-    # ------- 读取便捷属性（只读映射到 dataclass） -------
-    @property
-    def id(self):          return self.data.id
-    @property
-    def x(self):           return float(self.data.x)
-    @property
-    def y(self):           return float(self.data.y)
-    @property
-    def width(self):       return float(self.data.width)
-    @property
-    def height(self):      return float(self.data.height)
-    @property
-    def cx(self):          return float(self.data.cx)
-    @property
-    def cy(self):          return float(self.data.cy)
-    @property
-    def hint_level(self):  return int(self.data.hint_level)
-    @property
-    def section(self):     return self.data.section
-    @property
-    def label(self):       return self.data.label
-    @property
-    def category(self):    return self.data.category
-    @property
-    def enabled(self):     return bool(self.data.enabled)
-    # ------- 点击区域（补充） -------
-    @property
-    def click_customized(self): return bool(self.data.click_customized)
-    @property
-    def click_shape(self):  return self.data.cshape
-    @property
-    def click_cx(self):     return float(self.data.ccx)
-    @property
-    def click_cy(self):     return float(self.data.ccy)
-    @property
-    def click_a(self):      return float(self.data.ca)
-    @property
-    def click_b(self):      return float(self.data.cb)
-
-    # ------- 修改 API：写回 dataclass 并广播 -------
-    def set_rect(self, x: float, y: float, w: float, h: float, *, source=None, force: bool=False):
-        if self._updating and not force:
-            return
-        d = self.data
-        x, y, w, h = float(x), float(y), float(w), float(h)
-        changed = (x != d.x) or (y != d.y) or (w != d.width) or (h != d.height)
-
-        # 允许在几何“未变化”时也强制执行后续逻辑（用于初次载入自动适应）
-        if not changed and not force:
-            return
-
-        d.x, d.y, d.width, d.height = x, y, w, h
-        self.geometryChanged.emit(source)
-        self.anyChanged.emit(source)
-
-    def set_circle(self, cx: float, cy: float, *, source=None):
-        if self._updating: return
-        d = self.data
-        cx, cy = float(cx), float(cy)
-        changed = (cx != d.cx) or (cy != d.cy)
-        if not changed: return
-        d.cx, d.cy = cx, cy
-        self.circleChanged.emit(source)
-        self.anyChanged.emit(source)
-
-    # ------- 设置 API -------
-    def set_click_center(self, cx_abs: float, cy_abs: float, *, source=None):
-        if self._updating: return
-        if self.data.click_customized is False:
-            return  # 未启用自定义点击区域，忽略设置
-        d = self.data
-        cx_abs, cy_abs = float(cx_abs), float(cy_abs)
-        changed = (cx_abs != getattr(d, "ccx", -1.0)) or (cy_abs != getattr(d, "ccy", -1.0))
-        if not changed: return
-        d.ccx, d.ccy = cx_abs, cy_abs
-        self.anyChanged.emit(source)
-
-    def set_click_axes(self, a: float, b: float, *, source=None):
-        if self._updating: return
-        if self.data.click_customized is False:
-            return  # 未启用自定义点击区域，忽略设置
-        d = self.data
-        a = max(1.0, float(a)); b = max(1.0, float(b))
-        changed = (a != getattr(d, "ca", 0.0)) or (b != getattr(d, "cb", 0.0))
-        if not changed: return
-        d.ca, d.cb = a, b
-        self.anyChanged.emit(source)
-
-    def set_click_shape(self, shape: str, *, source=None):
-        if self._updating: return
-        if self.data.click_customized is False:
-            return  # 未启用自定义点击区域，忽略设置
-        d = self.data
-        shape = (str(shape) or "rect").lower()
-        shape = str(shape) if shape in ("rect", "ellipse") else "rect"
-        if shape == getattr(d, "cshape", "rect"): return
-        d.cshape = shape
-        self.anyChanged.emit(source)
-
-    # 可选：批量更新（避免中间反复发信号）
-    def begin(self): self._updating = True
-    def end(self, *, source=None):
-        self._updating = False
-        self.anyChanged.emit(source)
+from models import Cat, MIN_RECT_SIZE
 
 
 # ==============================================================
-# 2) 一个总线：同一个 Difference（按 id）对应同一个 DifferenceModel
 # ==============================================================
 
-class _DiffBus:
-    def __init__(self):
-        self._by_id: Dict[str, DifferenceModel] = {}
-
-    def get_model(self, d: Difference) -> DifferenceModel:
-        m = self._by_id.get(d.id)
-        if m is None:
-            m = DifferenceModel(d)
-            self._by_id[d.id] = m
-        return m
-
-DIFF_BUS = _DiffBus()
-
-def get_model_for_difference(d: Difference) -> DifferenceModel:
-    return DIFF_BUS.get_model(d)
-
-
-# ==============================================================
-# 3) 视图层：DifferenceItem（轻薄视图，仅缓存上一帧尺寸用于 prepareGeometryChange）
-# ==============================================================
-
-class DifferenceItem(QtWidgets.QGraphicsObject):
+class CatItem(QtWidgets.QGraphicsObject):
     """轻视图：不再持有业务状态（rect/circle/hint），全部读 model；仅缓存上一帧尺寸用于几何契约。"""
     radiusChanged = QtCore.Signal(str, float)
 
@@ -966,18 +822,16 @@ class DifferenceItem(QtWidgets.QGraphicsObject):
 
         e.accept()
 
-    # -------------------- 外部选中态 --------------------
-    def setExternalSelected(self, selected: bool, *, raise_z: bool = True) -> None:
-        if self._extern_selected == bool(selected):
-            return
-        self._extern_selected = bool(selected)
-        if raise_z:
-            self.setZValue(2 if self._extern_selected else 1)
-        self.update()
-
     # -------------------- itemChange：移动夹紧并写回 model --------------------
     def itemChange(self, change, value):
+        if change == QtWidgets.QGraphicsItem.ItemSceneHasChanged:
+            if value is None:
+                self._unregister_model_peer()
+            return super().itemChange(change, value)
+
         if change == QtWidgets.QGraphicsItem.ItemPositionChange and self.scene():
+            if self._syncing_from_model:
+                return value
             if not self._rect_interactions_allowed():
                 return QtCore.QPointF(self.pos())
             # 夹到场景
@@ -990,38 +844,12 @@ class DifferenceItem(QtWidgets.QGraphicsObject):
 
         if change == QtWidgets.QGraphicsItem.ItemPositionHasChanged:
             # 把移动写回 model（尺寸不变）
-            if self._rect_interactions_allowed():
+            if self._rect_interactions_allowed() and not self._syncing_from_model:
                 rect = self._current_rect_local()
                 self.model.set_rect(self.pos().x(), self.pos().y(), rect.width(), rect.height(), source=self)
+                self._notify_peers()
             return super().itemChange(change, value)
         return super().itemChange(change, value)
-
-    # -------------------- model → view 同步 --------------------
-    @QtCore.Slot(object)
-    def _on_model_geometry_changed(self, source):
-        # 无论 source 是否 self，都更新缓存尺寸与位置（setPos 相同值不会抖）
-        new_w = max(MIN_RECT_SIZE, float(self.model.width))
-        new_h = max(MIN_RECT_SIZE, float(self.model.height))
-        old_sz = self._cached_rect_size
-        if abs(new_w - old_sz.width()) > 1e-6 or abs(new_h - old_sz.height()) > 1e-6:
-            self.prepareGeometryChange()
-            self._cached_rect_size = QtCore.QSizeF(new_w, new_h)
-        self.setPos(self.model.x, self.model.y)
-        self._refresh_bounds_if_needed()
-        self._text_cache_key = None
-        self.update()
-
-    @QtCore.Slot(object)
-    def _on_model_circle_changed(self, source):
-        self._refresh_bounds_if_needed()   # ★ 新增
-        self.update()
-
-    @QtCore.Slot(object)
-    def _on_model_any_changed(self, source):
-        self._text_cache_key = None
-        self._apply_enabled_flags()   # ★ 新增：同步拖动/拉伸开关
-        self._refresh_bounds_if_needed()
-        self.update()
 
     # -------------------- 命中工具 --------------------
 
@@ -1029,10 +857,6 @@ class DifferenceItem(QtWidgets.QGraphicsObject):
     def _can_hit_rect(self) -> bool:
         """红框是否参与命中：需可见且允许交互（enabled）。"""
         return self._show_rect and self._rect_interactions_allowed() and self.isVisible()
-
-    def _can_hit_circle(self) -> bool:
-        """圆是否参与命中：需可见。"""
-        return self._show_circle and self.isVisible()
 
     def _can_hit_click(self) -> bool:
         """点击区域是否参与命中：需已自定义且可见。"""
@@ -1103,24 +927,6 @@ class DifferenceItem(QtWidgets.QGraphicsObject):
         return (dx*dx)/(a*a+1e-6) + (dy*dy)/(b*b+1e-6) <= 1.0
 
     # -------------------- 场景几何工具 --------------------
-    def _circle_pixmap_bbox(self) -> Optional[QtCore.QRectF]:
-        if not self._show_circle:
-            return None
-        c, r = self._current_circle_local()
-
-        lvl = max(1, min(int(self.model.hint_level), len(RADIUS_LEVELS)))
-        pm  = CirclePixmapProvider.instance().get(lvl)
-        if pm.isNull():
-            # 没有 PNG 时退回数学圆（也能工作）
-            return QtCore.QRectF(c.x()-r, c.y()-r, 2*r, 2*r)
-
-        # 处理高 DPI：逻辑尺寸 = 像素尺寸 / DPR
-        dpr = getattr(pm, "devicePixelRatio", lambda: 1.0)()
-        w = pm.width()  / (dpr or 1.0)
-        h = pm.height() / (dpr or 1.0)
-        top_left = QtCore.QPointF(c.x() - w*0.5, c.y() - h*0.5)
-        return QtCore.QRectF(top_left, QtCore.QSizeF(w, h))
-
     def _clamp_scene_rect(self, tl: QtCore.QPointF, br: QtCore.QPointF,
                           scene_rect: QtCore.QRectF) -> Tuple[QtCore.QPointF, QtCore.QPointF]:
         # 归一化
@@ -1157,26 +963,6 @@ class DifferenceItem(QtWidgets.QGraphicsObject):
         # 回到局部
         return cx_scene - self.model.x, cy_scene - self.model.y
 
-
-    def _clamp_axes_to_scene(self, cx_local: float, cy_local: float, a: float, b: float):
-        """只夹紧半轴到 sceneRect，中心点不动。入参/出参均为【局部坐标】。"""
-        scene = self.scene()
-        if not scene:
-            return max(1.0, float(a)), max(1.0, float(b))
-        scene_rect = scene.sceneRect()
-
-        cx_scene = self.model.x + float(cx_local)
-        cy_scene = self.model.y + float(cy_local)
-
-        # 以“中心点”为锚，半轴不能越出场景
-        max_a = max(1.0, min(cx_scene - scene_rect.left(),  scene_rect.right()  - cx_scene))
-        max_b = max(1.0, min(cy_scene - scene_rect.top(),   scene_rect.bottom() - cy_scene))
-
-        a = max(1.0, min(float(a), max_a))
-        b = max(1.0, min(float(b), max_b))
-        return a, b
-
-    
     def _clamp_click_to_scene(self, cx, cy, a, b, shape: str):
         scene_rect = self.scene().sceneRect() if self.scene() else QtCore.QRectF(-1e6,-1e6,2e6,2e6)
         # 中心（场景）
@@ -1205,16 +991,11 @@ class DifferenceItem(QtWidgets.QGraphicsObject):
             self._ordinal = n
             self.update()
 
-    def updateLabel(self):
-        # 现用现取 model.label，仅需清缓存
-        self._text_cache_key = None
-        self.update()
-
     def updateEnabledFlags(self):
         self._apply_enabled_flags()
         self.update()
 
-    def setVis(self, show_click: bool, show_rect: bool, show_circle: bool, show_label: bool):
+    def setVis(self, show_click: bool, show_rect: bool):
         # 这里仍可扩展：若需要真正的“隐藏圆/矩形/文字”，可以加局部变量控制
         # 简化起见，先保持全部显示；如需开关，可仿照原有结构加 3 个布尔并在 paint 中判断
         changed = False

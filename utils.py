@@ -1,8 +1,7 @@
 import os, math
 from typing import List, Tuple
 from PySide6 import QtCore, QtGui
-from models import Difference, RADIUS_LEVELS
-import img_rc
+from models import Cat
 
 QImage = QtGui.QImage
 
@@ -17,9 +16,6 @@ def quantize_roi(x: float, y: float, w: float, h: float, W: int, H: int):
     qh = max(1, min(H - t, _round_half_up(h)))
     return l, t, qw, qh
 
-def _radius_for(lvl: int) -> int:
-    idx  = max(0, min(len(RADIUS_LEVELS) - 1, int(lvl)))
-    return int(RADIUS_LEVELS[idx])
 
 def  _qimage_from_path(path: str) -> QImage:
     r = QtGui.QImageReader(path)
@@ -33,26 +29,26 @@ def _to_premultiplied(img:QImage) -> QImage:
     return img if img.format() == QImage.Format_ARGB32_Premultiplied \
                else img.convertToFormat(QImage.Format_ARGB32_Premultiplied)
 
-def compose_result(level_dir: str, name: str, ext: str, differences: List[Difference], margin: int = 40, gap: int = 24) -> QImage :
+def compose_result(level_dir: str, name: str, ext: str, cats: List[Cat], margin: int = 40, gap: int = 24) -> QImage :
     origin_path = os.path.join(level_dir, f"A", f"{name}_origin{ext}")
     base = _qimage_from_path(origin_path)
-    up_img, down_img = _render_regions_to_origin(base, differences, level_dir, name)
+    up_img, down_img = _render_regions_to_origin(base, cats, level_dir, name)
     up_img.save(os.path.join(level_dir, "B", "composite_up.png"))
     down_img.save(os.path.join(level_dir, "B", "composite_down.png"))
 
-    up_ov, down_ov = _render_circle_over_image(up_img, down_img, differences)
+    up_ov, down_ov = _render_circle_over_image(up_img, down_img, cats)
 
     result = _compose_four_grid(up_img, down_img, up_ov, down_ov)
 
     result.save(os.path.join(level_dir, "B", "apreview.png"))
 
-def _render_regions_to_origin(base: QtGui.QImage, differences: List[Difference], level_dir: str, name: str) -> Tuple[QImage, QImage]:
+def _render_regions_to_origin(base: QtGui.QImage, cats: List[Cat], level_dir: str, name: str) -> Tuple[QImage, QImage]:
     up_img = _to_premultiplied(base).copy()
     down_img = up_img.copy()
     W, H = base.width(), base.height()
     bounds = QtCore.QRect(0, 0, W, H)
 
-    for idx, d in enumerate(differences, start = 1):
+    for idx, d in enumerate(cats, start = 1):
         rpath = os.path.join(level_dir, f"A", f"{name}_region{idx}.png")
         if not os.path.isfile(rpath):
             continue
@@ -60,22 +56,18 @@ def _render_regions_to_origin(base: QtGui.QImage, differences: List[Difference],
         if small.isNull():
             continue
         l, t, _, _ = quantize_roi(d.x, d.y, d.width, d.height, W, H)
-        sec = d.section
-        if sec == "up":
-            _draw_to_image(up_img, small, l, t, bounds)
-        elif sec == "down":
-            _draw_to_image(down_img, small, l, t, bounds)
+        _draw_to_image(up_img, small, l, t, bounds)
 
     return up_img, down_img
 
 def _render_circle_over_image(up_img: QImage, down_img: QImage,
-                              differences: List[Difference]) -> Tuple[QImage, QImage]:
+                              cats: List[Cat]) -> Tuple[QImage, QImage]:
     u = up_img.copy()
     d = down_img.copy()
     W, H = u.width(), u.height()
     bounds = QtCore.QRect(0, 0, W, H)
 
-    for diff in differences:
+    for diff in cats:
         # 圆心：未设置则回退到红框中心（与编辑器一致）
         cx = diff.cx if diff.cx >= 0 else (diff.x + diff.width  * 0.5)
         cy = diff.cy if diff.cy >= 0 else (diff.y + diff.height * 0.5)
