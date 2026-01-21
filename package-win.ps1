@@ -1,5 +1,5 @@
 Param(
-  [string]$Name = "FindDiffEditor",
+  [string]$Name = "FindCatsTool",
   [string]$IconPath = "pyside_app\i.ico"
 )
 

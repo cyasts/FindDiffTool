@@ -2,10 +2,11 @@
 set -euo pipefail
 
 # ================== 基本配置 ==================
-APP_NAME=FindDiffEditor
+APP_NAME=FindCatTool
 ENTRY_FILE=main.py         # 如果放在子目录，改成 pyside_app/main.py
 ICON_FILE=Icon.icns        # 可不存在；不存在则忽略
 REQ_FILE=requirements.txt  # 依赖文件
+VERSION_FILE=version.py
 
 # ================== 工具函数 ==================
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -60,10 +61,12 @@ install_tools_and_deps() {
 
   # 安装项目依赖
   if [[ -f "$REQ_FILE" ]]; then
-    pip install -r "$REQ_FILE"
+    export PIP_NO_COMPILE=1
+    export PYTHONDONTWRITEBYTECODE=1
+    pip install --no-compile -r "$REQ_FILE"
   fi
   # 安装打包工具
-  pip install "pyinstaller>=6.9,<7" "altgraph>=0.17.4" "macholib>=1.16.3"
+  pip install --no-compile "pyinstaller>=6.9,<7" "altgraph>=0.17.4" "macholib>=1.16.3"
 }
 
 build_one_arch() {
@@ -81,7 +84,20 @@ build_one_arch() {
   # shellcheck disable=SC1090
   source "$venv/bin/activate"
 
-  local NAME="${APP_NAME}-${arch}"
+  local VERSION_SUFFIX=""
+  if [[ -f "$VERSION_FILE" ]]; then
+    local VERSION
+    VERSION="$(python - <<'PY'
+from version import version
+print(version)
+PY
+)"
+    if [[ -n "$VERSION" ]]; then
+      VERSION_SUFFIX="-v${VERSION}"
+    fi
+  fi
+
+  local NAME="${APP_NAME}${VERSION_SUFFIX}-${arch}"
   local PYI_ARGS=(
     --noconfirm
     --name "$NAME"
