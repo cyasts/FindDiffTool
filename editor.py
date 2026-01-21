@@ -1,4 +1,4 @@
-import os, json, math
+import os, json
 import shutil, uuid
 from typing import Dict, List, Optional, Tuple
 from PySide6 import QtCore, QtGui, QtWidgets
@@ -116,6 +116,7 @@ class EditorWindow(QtWidgets.QMainWindow):
         self.cats: List[Cat] = []
         self.rect_items_up: Dict[str, CatItem] = {}
         self.rect_items_down: Dict[str, CatItem] = {}
+        self._syncing_rect_update: bool = False
         self.status: str = 'saved'
         # dirty state for title asterisk
         self._is_dirty: bool = False
@@ -241,7 +242,19 @@ class EditorWindow(QtWidgets.QMainWindow):
         self.update_total_count()
 
 
-    def _on_item_chaned(self, cat_id: str)->None:
+    def _on_item_chaned(self, cat_id: str) -> None:
+        if self._syncing_rect_update:
+            return
+        self._syncing_rect_update = True
+        try:
+            it_up = self.rect_items_up.get(cat_id)
+            it_down = self.rect_items_down.get(cat_id)
+            if it_up:
+                it_up.sync_from_model()
+            if it_down:
+                it_down.sync_from_model()
+        finally:
+            self._syncing_rect_update = False
         self._make_dirty()
 
     def _add_rect_items(self, cat: Cat) -> None:
@@ -395,6 +408,22 @@ class EditorWindow(QtWidgets.QMainWindow):
         self.update_total_count()
         self.refresh_visibility()
 
+    def _set_all_enabled(self, enabled: bool) -> None:
+        enabled = bool(enabled)
+        for cat in self.cats:
+            cat.enabled = enabled
+
+        for it in self.rect_items_up.values():
+            it.setFlag(QtWidgets.QGraphicsItem.ItemIsMovable, enabled)
+            it.update()
+        for it in self.rect_items_down.values():
+            it.setFlag(QtWidgets.QGraphicsItem.ItemIsMovable, enabled)
+            it.update()
+
+        self.rebuild_lists()
+        self.refresh_visibility()
+        self._make_dirty()
+
     def delete_cat_by_id(self, cat_id: str) -> None:
         idx = next((i for i, d in enumerate(self.cats) if d.id == cat_id), -1)
         if idx < 0:
@@ -469,56 +498,8 @@ class EditorWindow(QtWidgets.QMainWindow):
     def config_json_path(self) -> str:
         return os.path.join(self.level_dir(), f"A", f"config.json")
 
-
-    def validate_before_save(self) -> Tuple[bool, Optional[str]]:
-        # circle overlap <= 10%
-        # compute circle geometries in the same (natural) coordinate space
-        circles = []
-        for d in self.cats:
-            r_w, r_h = d.width, d.height
-            cx_abs = d.cx if d.cx >= 0 else r_w / 2.0
-            cy_abs = d.cy if d.cy >= 0 else r_h / 2.0
-            lvl = d.hint_level
-            radius_px = float(RADIUS_LEVELS[lvl - 1])
-            circles.append((cx_abs, cy_abs, radius_px))
-
-        def circle_overlap_ratio(c1, c2) -> float:
-            # return overlap area divided by smaller circle area
-            (x1, y1, r1) = c1
-            (x2, y2, r2) = c2
-            dx = x1 - x2
-            dy = y1 - y2
-            d = max(0.0, (dx * dx + dy * dy) ** 0.5)
-            if d >= r1 + r2:
-                return 0.0
-            if d <= abs(r1 - r2):
-                inter_area = 3.141592653589793 * min(r1, r2) ** 2
-            else:
-                # circle-circle intersection area formula
-                alpha = math.acos((r1 * r1 + d * d - r2 * r2) / (2 * r1 * d))
-                beta = math.acos((r2 * r2 + d * d - r1 * r1) / (2 * r2 * d))
-                inter_area = r1 * r1 * alpha + r2 * r2 * beta - 0.5 * math.sin(2 * alpha) * r1 * r1 - 0.5 * math.sin(2 * beta) * r2 * r2
-            small_area = 3.141592653589793 * min(r1, r2) ** 2
-            return inter_area / max(1.0, small_area)
-
-        n = len(circles)
-        violations: List[str] = []
-        for i in range(n):
-            for j in range(i + 1, n):
-                ratio = circle_overlap_ratio(circles[i], circles[j])
-                if ratio > 0.10:
-                    violations.append(f"茬点{i + 1} 与 茬点{j + 1} 重叠 {ratio * 100:.1f}% (>10%)")
-        if violations:
-            return False, "存在圆形区域重叠超过10%的情况：\n" + "\n".join(violations[:10])
-
-        return True, None
-
     def on_save_clicked(self) -> None:
         # Save now also performs pre-save validation
-        ok, msg = self.validate_before_save()
-        if not ok:
-            QtWidgets.QMessageBox.warning(self, "校验失败", msg or "校验失败")
-            return
         self.save_config()
         self._is_dirty = False
         self._update_window_title()
@@ -648,7 +629,7 @@ class EditorWindow(QtWidgets.QMainWindow):
             "imageHeight": int(self.up_scene.height()),
             "status": self.status,
             "caterenceCount": len(self.cats),
-            "cats": []
+            "differences": []
         }
         for idx, d in enumerate(self.cats):
             points = [
@@ -659,34 +640,18 @@ class EditorWindow(QtWidgets.QMainWindow):
             ]
             # compute hint circle from stored local center and radius
             # local center -> absolute
-            cx = to_percent_x(d.cx)
-            cy = to_percent_y_bottom(d.cy)
-            cx = max(0.0, min(1.0, cx))
-            cy = max(0.0, min(1.0, cy))
-
             ccx = to_percent_x(d.ccx)
             ccy = to_percent_y_bottom(d.ccy)
             ccx = max(0.0, min(1.0, ccx))
             ccy = max(0.0, min(1.0, ccy))
 
-            lvl = d.hint_level
-            # 从 hint level 获取半径（修正list越界问题）
-            if isinstance(lvl, int) and 1 <= lvl <= len(RADIUS_LEVELS):
-                radius = RADIUS_LEVELS[lvl - 1]
-            else:
-                radius = 0
 
             entry = {
                 "id": d.id,
                 "name": d.name,
-                "section": ('down' if d.section == 'down' else 'up'),
-                "category": d.category or "",
                 "replaceImage": f"{file_name}_region{idx+1}.png",
                 "enabled": bool(d.enabled),
                 "points": points,
-                "hintLevel": int(lvl),
-                "circleCenter": {"x": cx, "y": cy},
-                "circleRadius": radius,
                 "click_customized": bool(d.click_customized),  # 只存标记
             }
             if d.click_customized:
@@ -698,7 +663,7 @@ class EditorWindow(QtWidgets.QMainWindow):
                     "click_type": d.cshape
                 })
 
-            data["cats"].append(entry)
+            data["differences"].append(entry)
 
         os.makedirs(self.level_dir(), exist_ok=True)
         cfg_path = self.config_json_path()
@@ -761,7 +726,7 @@ class EditorWindow(QtWidgets.QMainWindow):
         self._clear_all_items()
         self._update_status(cfg.get('status', "unsaved"))
         self.cats.clear()
-        for cat in cfg.get('cats', []):
+        for cat in cfg.get('differences', []):
             points = cat.get('points', [])
             if len(points) < 4:
                 continue
@@ -769,10 +734,6 @@ class EditorWindow(QtWidgets.QMainWindow):
             ys = [from_percent_y_bottom(p['y']) for p in points]
             min_x, max_x = min(xs), max(xs)
             min_y, max_y = min(ys), max(ys)
-            c_x = float(cat.get('circleCenter', {}).get('x', -1))
-            c_y = float(cat.get('circleCenter', {}).get('y', -1))
-            cpx = from_percent_x(c_x)
-            cpy = from_percent_y_bottom(c_y)
 
             w_rect = max(MIN_RECT_SIZE, max_x - min_x)
             h_rect = max(MIN_RECT_SIZE, max_y - min_y)
@@ -800,17 +761,12 @@ class EditorWindow(QtWidgets.QMainWindow):
             d = Cat(
                 id=str(cat.get('id', now_id())),
                 name=str(cat.get('name', f"不同点 {len(self.cats) + 1}")),
-                section=('down' if cat.get('section') == 'down' else 'up'),
-                category=str(cat.get('category', "")),
-                label=str(cat.get('label', "")),
                 enabled=bool(cat.get('enabled', True)),
                 visible=True,
                 x=min_x,
                 y=min_y,
                 width=max(MIN_RECT_SIZE, max_x - min_x),
                 height=max(MIN_RECT_SIZE, max_y - min_y),
-                cx=float(cpx),
-                cy=float(cpy),
                 click_customized=use_custom,
                 cshape=shape,
                 ccx=float(ccx_abs),

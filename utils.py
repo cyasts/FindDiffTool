@@ -36,9 +36,7 @@ def compose_result(level_dir: str, name: str, ext: str, cats: List[Cat], margin:
     up_img.save(os.path.join(level_dir, "B", "composite_up.png"))
     down_img.save(os.path.join(level_dir, "B", "composite_down.png"))
 
-    up_ov, down_ov = _render_circle_over_image(up_img, down_img, cats)
-
-    result = _compose_four_grid(up_img, down_img, up_ov, down_ov)
+    result = _compose_two_grid(up_img, down_img)
 
     result.save(os.path.join(level_dir, "B", "apreview.png"))
 
@@ -56,47 +54,33 @@ def _render_regions_to_origin(base: QtGui.QImage, cats: List[Cat], level_dir: st
         if small.isNull():
             continue
         l, t, _, _ = quantize_roi(d.x, d.y, d.width, d.height, W, H)
-        _draw_to_image(up_img, small, l, t, bounds)
+        _draw_to_image(down_img, small, l, t, bounds)
 
     return up_img, down_img
 
-def _render_circle_over_image(up_img: QImage, down_img: QImage,
-                              cats: List[Cat]) -> Tuple[QImage, QImage]:
-    u = up_img.copy()
-    d = down_img.copy()
-    W, H = u.width(), u.height()
-    bounds = QtCore.QRect(0, 0, W, H)
+def _compose_two_grid(up_img: QImage, down_img: QImage, margin: int = 40, gap: int = 24)-> QImage:
+    w, h = up_img.width(), up_img.height()
 
-    for diff in cats:
-        # 圆心：未设置则回退到红框中心（与编辑器一致）
-        cx = diff.cx if diff.cx >= 0 else (diff.x + diff.width  * 0.5)
-        cy = diff.cy if diff.cy >= 0 else (diff.y + diff.height * 0.5)
+    W = margin + w + gap + w + margin
+    H = margin + h + margin
 
-        lvl = int(diff.hint_level)
-        circle = _qimage_from_path(f":/img/c{lvl}.png")
+    canvas = QImage(W, H, QImage.Format_ARGB32_Premultiplied)
+    canvas.fill(QtGui.QColor(255, 255, 255))
 
-        # 先记住原 DPR，避免 _to_premultiplied 之后丢失
-        dpr = circle.devicePixelRatio() if hasattr(circle, "devicePixelRatio") else 1.0
-        circle = _to_premultiplied(circle)
-        try:
-            if dpr and hasattr(circle, "setDevicePixelRatio"):
-                circle.setDevicePixelRatio(dpr)
-        except Exception:
-            pass
+    p = QtGui.QPainter(canvas)
+    p.setCompositionMode(QtGui.QPainter.CompositionMode_SourceOver)
+    p.setRenderHints(QtGui.QPainter.RenderHint(0))
 
-        # 圈图“逻辑尺寸”（不缩放）
-        cw = circle.width()  / (dpr or 1.0)
-        ch = circle.height() / (dpr or 1.0)
+    x1 = margin
+    x2 = margin + w + gap
+    y1 = margin
 
-        # 以圆心对齐贴图：左上角 = (cx - cw/2, cy - ch/2)
-        x = _round_half_up(cx - cw * 0.5)
-        y = _round_half_up(cy - ch * 0.5)
+    # 单排：左=up，右=down
+    p.drawImage(QtCore.QPoint(x1, y1), up_img)
+    p.drawImage(QtCore.QPoint(x2, y1), down_img)
 
-        _draw_to_image(u, circle, int(x), int(y), bounds)
-        _draw_to_image(d, circle, int(x), int(y), bounds)
-
-    return u, d
-
+    p.end()
+    return canvas
 
 def _compose_four_grid(up_img: QImage, down_img: QImage, overlay_up:QImage, overlay_down: QImage, margin: int = 40, gap: int = 24)-> QImage:
     w, h = up_img.width(), up_img.height()

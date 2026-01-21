@@ -83,9 +83,11 @@ class CatItem(QtWidgets.QGraphicsObject):
             max(MIN_RECT_SIZE, float(self.model.width)),
             max(MIN_RECT_SIZE, float(self.model.height))
         )
+        self._syncing_from_model = False
         # 性能/Flags
         self.setCacheMode(QtWidgets.QGraphicsItem.NoCache)
         self.setFlag(QtWidgets.QGraphicsItem.ItemSendsGeometryChanges, True)   # 以便截获移动
+        self.setFlag(QtWidgets.QGraphicsItem.ItemIsMovable, bool(self.model.enabled))
         self.setAcceptedMouseButtons(QtCore.Qt.LeftButton)
         self.setAcceptHoverEvents(True)
         self.setCursor(QtCore.Qt.OpenHandCursor)
@@ -100,6 +102,22 @@ class CatItem(QtWidgets.QGraphicsObject):
         w = max(MIN_RECT_SIZE, float(self.model.width))
         h = max(MIN_RECT_SIZE, float(self.model.height))
         return QtCore.QRectF(0, 0, w, h)
+
+    def sync_from_model(self) -> None:
+        self._syncing_from_model = True
+        try:
+            self.setPos(float(self.model.x), float(self.model.y))
+            self._refresh_bounds_if_needed()
+            self.update()
+        finally:
+            self._syncing_from_model = False
+
+    def _emit_change(self) -> None:
+        if callable(self._on_change):
+            try:
+                self._on_change(self.model.id)
+            except Exception:
+                pass
 
         # 仅当 enabled 为 True 才允许矩形交互（移动/拉伸）
     def _rect_interactions_allowed(self) -> bool:
@@ -482,7 +500,10 @@ class CatItem(QtWidgets.QGraphicsObject):
             tl_scene, br_scene = self._clamp_scene_rect(tl_scene, br_scene, scene_rect)
             # 应用到 model
             x, y, w, h = tl_scene.x(), tl_scene.y(), br_scene.x()-tl_scene.x(), br_scene.y()-tl_scene.y()
-            self.model.set_rect(x, y, max(MIN_RECT_SIZE, w), max(MIN_RECT_SIZE, h), source=self)
+            self.model.set_rect(x, y, max(MIN_RECT_SIZE, w), max(MIN_RECT_SIZE, h))
+            self._refresh_bounds_if_needed()
+            self.update()
+            self._emit_change()
             e.accept(); return
 
         if self._mode == self.Mode.RESIZE_EDGE:
@@ -502,6 +523,9 @@ class CatItem(QtWidgets.QGraphicsObject):
             tl_scene, br_scene = self._clamp_scene_rect(tl_scene, br_scene, scene_rect)
             x, y, w, h = tl_scene.x(), tl_scene.y(), br_scene.x()-tl_scene.x(), br_scene.y()-tl_scene.y()
             self.model.set_rect(x, y, max(MIN_RECT_SIZE, w), max(MIN_RECT_SIZE, h))
+            self._refresh_bounds_if_needed()
+            self.update()
+            self._emit_change()
             e.accept(); return
 
         if self._mode in (self.Mode.CLICK_MOVE, self.Mode.CLICK_EDGE, self.Mode.CLICK_CORNER):
@@ -533,6 +557,9 @@ class CatItem(QtWidgets.QGraphicsObject):
 
                 # 写回绝对坐标
                 self.model.set_click_center(cx_scene, cy_scene)
+                self._refresh_bounds_if_needed()
+                self.update()
+                self._emit_change()
                 e.accept(); return
 
             if self._mode == self.Mode.CLICK_EDGE:
@@ -556,6 +583,9 @@ class CatItem(QtWidgets.QGraphicsObject):
                 b_new = max(1.0, min(float(b_new), max_b))
 
                 self.model.set_click_axes(a_new, b_new)
+                self._refresh_bounds_if_needed()
+                self.update()
+                self._emit_change()
                 e.accept(); return
             if self._mode == self.Mode.CLICK_CORNER:
                 cx_loc, cy_loc = cx, cy  # 局部中心保持不变
@@ -580,6 +610,9 @@ class CatItem(QtWidgets.QGraphicsObject):
                 b_new = max(1.0, min(float(b_new), max_b))
 
                 self.model.set_click_axes(a_new, b_new)
+                self._refresh_bounds_if_needed()
+                self.update()
+                self._emit_change()
                 e.accept(); return
 
         e.ignore()
@@ -588,12 +621,28 @@ class CatItem(QtWidgets.QGraphicsObject):
         self._mode = self.Mode.NONE
         self._is_resizing = False
         self.setCursor(QtCore.Qt.OpenHandCursor)
-        if callable(self._on_change):
-            try:
-                self._on_change(self.model.id)
-            except Exception:
-                pass
         super().mouseReleaseEvent(e)
+
+    def itemChange(self, change, value):
+        if change == QtWidgets.QGraphicsItem.ItemPositionChange and self.scene():
+            if self._syncing_from_model:
+                return value
+            if not self._rect_interactions_allowed():
+                return QtCore.QPointF(self.pos())
+            rect = self._current_rect_local()
+            scene_rect = self.scene().sceneRect()
+            new_pos: QtCore.QPointF = value
+            new_x = max(scene_rect.left(),  min(new_pos.x(), scene_rect.right()  - rect.width()))
+            new_y = max(scene_rect.top(),   min(new_pos.y(), scene_rect.bottom() - rect.height()))
+            return QtCore.QPointF(new_x, new_y)
+
+        if change == QtWidgets.QGraphicsItem.ItemPositionHasChanged:
+            if not self._syncing_from_model and self._rect_interactions_allowed():
+                rect = self._current_rect_local()
+                self.model.set_rect(self.pos().x(), self.pos().y(), rect.width(), rect.height())
+                self._emit_change()
+            return super().itemChange(change, value)
+        return super().itemChange(change, value)
 
     # -------------------- 命中工具 --------------------
 
