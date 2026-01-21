@@ -330,7 +330,7 @@ class CatItem(QtWidgets.QGraphicsObject):
         rect = self._current_rect_local()
         path.addRect(rect)
 
-        if self._show_click:
+        if self.model.click_customized and self._show_click:
             c, a, b, shape = self._current_click_local()
             click_rect = QtCore.QRectF(c.x()-a, c.y()-b, 2*a, 2*b)
             click = QtGui.QPainterPath()
