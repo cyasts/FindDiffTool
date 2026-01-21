@@ -4,9 +4,9 @@ from typing import Dict, List, Optional, Tuple
 from PySide6 import QtCore, QtGui, QtWidgets
 
 from utils import compose_result, quantize_roi
-from models import Difference, RADIUS_LEVELS, MIN_RECT_SIZE,CATEGORY_COLOR_MAP
+from models import Cat, MIN_RECT_SIZE
 from scenes import ImageScene, ImageView
-from graphics import DifferenceItem
+from graphics import CatItem
 
 def now_id() -> str:
     return uuid.uuid4().hex
@@ -189,7 +189,7 @@ class EditorWindow(QtWidgets.QMainWindow):
         add_btn = QtWidgets.QPushButton("增加猫框")
         add_btn.setObjectName("btn_add_cat")
         add_btn.clicked.connect(self.add_cat)
-        color = QtGui.QColor('#ff0000')
+        color = QtGui.QColor('#ff9800')
         add_btn.setStyleSheet(f"QPushButton {{ color: #fff; border:none; border-radius:14px; padding:6px 8px; background:{color.name()}; }}")
         add_btn.setFixedHeight(34)
         layout.addWidget(add_btn, 0)
@@ -200,13 +200,10 @@ class EditorWindow(QtWidgets.QMainWindow):
         # 取消 hover 同步高亮：仅保留选中高亮
         list_widget.setMouseTracking(False)
         list_widget.viewport().setMouseTracking(False)
+        self.list_widget = list_widget
         layout.addWidget(list_widget, 1)
 
         return panel
-
-    def current_list(self, section: str) -> QtWidgets.QListWidget:
-        # 统一使用下侧列表
-        return self.findChild(QtWidgets.QListWidget, "list_down")
 
     def add_cat(self) -> None:
         # 统一添加到下图
@@ -247,118 +244,123 @@ class EditorWindow(QtWidgets.QMainWindow):
     def _on_item_chaned(self, cat_id: str)->None:
         self._make_dirty()
 
-    def _add_rect_items(self, diff: Difference) -> None:
-        color = CATEGORY_COLOR_MAP.get(diff.category, QtGui.QColor('#ff0000'))
-        item_up = DifferenceItem(diff, color, on_change=self._on_item_chaned, is_up=True)
-        item_down = DifferenceItem(diff, color, on_change=self._on_item_chaned, is_up=False)
+    def _add_rect_items(self, cat: Cat) -> None:
+        item_up = CatItem(cat, on_change=self._on_item_chaned, is_up=True)
+        item_down = CatItem(cat, on_change=self._on_item_chaned, is_up=False)
         self.up_scene.addItem(item_up)
         self.down_scene.addItem(item_down)
-        self.rect_items_up[diff.id] = item_up
-        self.rect_items_down[diff.id] = item_down
+        self.rect_items_up[cat.id] = item_up
+        self.rect_items_down[cat.id] = item_down
         self.refresh_visibility()
 
     def rebuild_lists(self) -> None:
-        down = self.current_list('down')
-
-        # ==== 屏蔽信号 + 标记重建中 ====
         self._rebuilding = True
-        block_down = QtCore.QSignalBlocker(down)
+        blocker = QtCore.QSignalBlocker(self.list_widget)
         try:
-            # 1) 清空
-            if down:
-                down.clear()
+            self.list_widget.clear()
 
-            # === 列宽配置 ===
-            # 顺序：可见 | 标题 | 启用 | 删除
-            COL_FIXED = {0: 22, 1: 60, 2: 22, 3: 28}
+            # 7列：可见label | 可见checkbox | 序号label | 启用label | 启用checkbox | 删除label | 删除按钮
+            COL_FIXED = {
+                0: 80,  # "序号:x"
+                1: 34,  # "可见:"
+                2: 22,  # checkbox
+                3: 34,  # "启用:"
+                4: 22,  # checkbox
+                5: 34,  # "删除:"
+                6: 28,  # delete button
+            }
             HSP = 6
             MARG = (6, 4, 6, 4)
 
-            global_idx = 1
-            for cat in self.cats:
-                lw = self.current_list('down')
-                if lw is None:
-                    break
-                color = QtGui.QColor('#ff0000')
-
+            for idx, cat in enumerate(self.cats, start=1):
                 item = QtWidgets.QListWidgetItem()
                 item.setData(QtCore.Qt.UserRole, cat.id)
 
-                w = QtWidgets.QWidget()
-                gl = QtWidgets.QGridLayout(w)
+                row = QtWidgets.QWidget()
+                gl = QtWidgets.QGridLayout(row)
                 gl.setContentsMargins(*MARG)
                 gl.setHorizontalSpacing(HSP)
+                gl.setVerticalSpacing(0)
 
-                title = QtWidgets.QLabel(f"序号{global_idx}")
-                title.setStyleSheet(f"color:{color.name()}; font-size:12px; font-weight:600;")
+                # ---- controls (7) ----
+                visibleLabel = QtWidgets.QLabel("可见:")
+                visibleLabel.setStyleSheet("font-size:12px; color:#333;")
 
                 visibled = QtWidgets.QCheckBox()
-                visibled.setChecked(cat.visible)
+                visibled.setChecked(bool(cat.visible))
                 visibled.setToolTip("显示/隐藏红框")
                 visibled.toggled.connect(lambda checked, _id=cat.id: self.on_visibled_toggled(_id, checked))
 
+                title = QtWidgets.QLabel(f"序号:{idx}")
+                title.setStyleSheet("font-size:12px; font-weight:600; color:#333;")
+
+                enableLabel = QtWidgets.QLabel("启用:")
+                enableLabel.setStyleSheet("font-size:12px; color:#333;")
 
                 enabled_box = QtWidgets.QCheckBox()
-                enabled_box.setChecked(cat.enabled)
+                enabled_box.setChecked(bool(cat.enabled))
                 enabled_box.setToolTip("开启后可拖动/调整红框")
                 enabled_box.toggled.connect(lambda checked, _id=cat.id: self.on_enabled_toggled(_id, checked))
+
+                delLabel = QtWidgets.QLabel("删除:")
+                delLabel.setStyleSheet("font-size:12px; color:#333;")
 
                 btn_delete = QtWidgets.QToolButton()
                 btn_delete.setToolTip("删除该茬点")
                 btn_delete.setAutoRaise(True)
                 btn_delete.setFixedSize(24, 24)
-                try:
-                    btn_delete.setText("X")
-                    btn_delete.setIconSize(QtCore.QSize(14, 14))
-                except Exception:
-                    btn_delete.setText("X")
+                btn_delete.setText("X")
                 btn_delete.setStyleSheet(
                     "QToolButton{border:none;background:transparent;}"
                     "QToolButton:hover{background:rgba(220,53,69,0.12);border-radius:4px;}"
                 )
                 btn_delete.clicked.connect(lambda _=False, _id=cat.id: self.delete_cat_by_id(_id))
 
-                # ---- 尺寸策略 ----
-                for wid in (visibled, enabled_box, btn_delete, title):
+                # ---- sizing ----
+                title.setFixedWidth(COL_FIXED[0])
+                visibleLabel.setFixedWidth(COL_FIXED[1])
+                visibled.setFixedWidth(COL_FIXED[2])
+                enableLabel.setFixedWidth(COL_FIXED[3])
+                enabled_box.setFixedWidth(COL_FIXED[4])
+                delLabel.setFixedWidth(COL_FIXED[5])
+                btn_delete.setFixedWidth(COL_FIXED[6])
+
+                for wid in (visibleLabel, visibled, title, enableLabel, enabled_box, delLabel, btn_delete):
                     wid.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Fixed)
 
-                visibled.setFixedWidth(COL_FIXED[0])
-                title.setFixedWidth(COL_FIXED[1])
-                enabled_box.setFixedWidth(COL_FIXED[2])
-                btn_delete.setFixedWidth(3)
+                # ---- layout placement (row 0, col 0..6) ----
+                gl.addWidget(title,        0, 0)
+                gl.addWidget(visibleLabel, 0, 1)
+                gl.addWidget(visibled,     0, 2)
+                gl.addWidget(enableLabel,  0, 3)
+                gl.addWidget(enabled_box,  0, 4)
+                gl.addWidget(delLabel,     0, 5)
+                gl.addWidget(btn_delete,   0, 6)
 
+                # ---- column widths & stretch ----
                 for col, wpx in COL_FIXED.items():
                     gl.setColumnMinimumWidth(col, wpx)
                     gl.setColumnStretch(col, 0)
+
+                # 让 title 这一列吃一点多余空间（可选）
                 gl.setColumnStretch(2, 1)
 
-                gl.addWidget(visibled,     0, 0)
-                gl.addWidget(title,        0, 1)
-                gl.addWidget(enabled_box,  0, 2)
-                gl.addWidget(btn_delete,   0, 3)
+                # ---- size hint ----
+                row_min_w = sum(COL_FIXED.values()) + HSP * (len(COL_FIXED) - 1) + MARG[0] + MARG[2]
+                row.setMinimumWidth(row_min_w)
+                row.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
 
-                ncols = 5
-                row_min_w = sum(COL_FIXED.values()) + HSP*(ncols-1) + MARG[0] + MARG[2]
-                w.setMinimumWidth(row_min_w)
-                w.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
-
-                w.setLayout(gl)
-                item.setSizeHint(w.sizeHint())
-                lw.addItem(item)
-                lw.setItemWidget(item, w)
-                global_idx += 1
+                item.setSizeHint(row.sizeHint())
+                self.list_widget.addItem(item)
+                self.list_widget.setItemWidget(item, row)
 
             self.update_total_count()
 
-            # 重建后默认不选中任何行（避免触发回调后的选中联动）
-            if down:
-                down.clearSelection(); down.setCurrentRow(-1)
-
         finally:
             self._rebuilding = False
-            # QSignalBlocker 离开作用域自动恢复信号
 
         self._update_ordinals()
+
 
     def on_visibled_toggled(self, cat_id: str, checked: bool) -> None:
         cat = next((d for d in self.cats if d.id == cat_id), None)
@@ -458,7 +460,7 @@ class EditorWindow(QtWidgets.QMainWindow):
         for d in (self.rect_items_up, self.rect_items_down):
             for item in d.values():
                 item.setVis(show_click_region, show_regions)
-                item.updateEnabledFlags()
+                # item.updateEnabledFlags()
 
     def level_dir(self) -> str:
         # directory for this level

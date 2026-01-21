@@ -2,9 +2,7 @@
 from __future__ import annotations
 
 from PySide6 import QtCore, QtGui, QtWidgets
-from typing import Optional, Dict, Tuple
-import weakref
-
+from typing import Optional, Tuple
 # 由你的工程提供
 from models import Cat, MIN_RECT_SIZE
 
@@ -31,9 +29,6 @@ class CatItem(QtWidgets.QGraphicsObject):
     HANDLE_BR_CLICK = QtGui.QBrush(QtGui.QColor('#1976d2'))   # 蓝色（和点击区域一致）
     HANDLE_PEN      = QtGui.QPen(QtCore.Qt.NoPen)
 
-    PEN_CIRCLE    = QtGui.QPen(QtGui.QColor('#00c853'), 3)
-    PEN_CIRCLE_HL = QtGui.QPen(QtGui.QColor('#00e676'), 4)
-    BRUSH_CIRC_HL = QtGui.QBrush(QtGui.QColor(0, 230, 118, 30))
 
     HANDLE_BR     = QtGui.QBrush(QtGui.QColor('#d32f2f'))
     HANDLE_PEN    = QtGui.QPen(QtCore.Qt.NoPen)
@@ -43,15 +38,15 @@ class CatItem(QtWidgets.QGraphicsObject):
     CORNER_THRESH  = 12.0
 
     class Mode:
-        NONE=0; MOVE=1; RESIZE_CORNER=2; RESIZE_EDGE=3; DRAG_CIRCLE=4
-        CLICK_MOVE=5; CLICK_EDGE=6; CLICK_CORNER=7
+        NONE=0; MOVE=1; RESIZE_CORNER=2; RESIZE_EDGE=3;
+        CLICK_MOVE=4; CLICK_EDGE=5; CLICK_CORNER=6
 
-    def __init__(self, diff: Difference,
+    def __init__(self, cat: Cat,
                  color: Optional[QtGui.QColor] = None,
                  on_change=None,
                  is_up: bool = True):
         super().__init__()
-        self.model = get_model_for_difference(diff)
+        self.model = cat
         self.is_up = is_up
         self._on_change = on_change
         self._ordinal: int = 1 # 新增：显示用序号（1-based）
@@ -66,7 +61,6 @@ class CatItem(QtWidgets.QGraphicsObject):
         self._extern_selected: bool = False
         self._selected_alpha: int = 200
         self._hl_rect   = False
-        self._hl_circle = False
         self._hl_click  = False
 
         self._mode = self.Mode.NONE
@@ -81,8 +75,6 @@ class CatItem(QtWidgets.QGraphicsObject):
         # 可见性（内部控制，默认全开）
         self._show_click = True
         self._show_rect = True
-        self._show_circle = True
-        self._show_label = True
 
         self._cached_bounds_rect = self._compute_bounds_union()
 
@@ -91,7 +83,6 @@ class CatItem(QtWidgets.QGraphicsObject):
             max(MIN_RECT_SIZE, float(self.model.width)),
             max(MIN_RECT_SIZE, float(self.model.height))
         )
-        self._apply_enabled_flags()   # ★ 新增：同步拖动/拉伸开关
         # 性能/Flags
         self.setCacheMode(QtWidgets.QGraphicsItem.NoCache)
         self.setFlag(QtWidgets.QGraphicsItem.ItemSendsGeometryChanges, True)   # 以便截获移动
@@ -103,56 +94,16 @@ class CatItem(QtWidgets.QGraphicsObject):
         # 初始位置
         self.setPos(self.model.x, self.model.y)
 
-        # 订阅 model（另一侧变化时我同步）
-        self.model.geometryChanged.connect(self._on_model_geometry_changed)
-        self.model.circleChanged.connect(self._on_model_circle_changed)
-        self.model.anyChanged.connect(self._on_model_any_changed)
-
     # -------------------- 派生值（现算现用） --------------------
-    def _radius_from_model(self) -> float:
-        lvl = max(1, min(int(self.model.hint_level), len(RADIUS_LEVELS)))
-        return float(RADIUS_LEVELS[lvl - 1])
-
     def _current_rect_local(self) -> QtCore.QRectF:
         """本地坐标下的矩形：始终 (0,0,w,h)"""
         w = max(MIN_RECT_SIZE, float(self.model.width))
         h = max(MIN_RECT_SIZE, float(self.model.height))
         return QtCore.QRectF(0, 0, w, h)
 
-    def _current_circle_local(self) -> Tuple[QtCore.QPointF, float]:
-        """返回（局部圆心, 半径），渲染时进行夹紧，不改 model。"""
-        rect = self._current_rect_local()
-        w, h = rect.width(), rect.height()
-        r = self._radius_from_model()
-
-        scene = self.scene()
-        scene_rect = scene.sceneRect() if scene else QtCore.QRectF(-1e6, -1e6, 2e6, 2e6)
-
-        # 若未设定绝对坐标，则默认用“矩形中心的场景坐标”
-        if self.model.cx < 0 or self.model.cy < 0:
-            cx_scene = self.model.x + w / 2.0
-            cy_scene = self.model.y + h / 2.0
-        else:
-            cx_scene = float(self.model.cx)
-            cy_scene = float(self.model.cy)
-        # 夹紧到场景，保证整圆可见（如不想限制可移除这段）
-        cx_scene = max(scene_rect.left() + r,  min(cx_scene, scene_rect.right()  - r))
-        cy_scene = max(scene_rect.top()  + r,  min(cy_scene, scene_rect.bottom() - r))
-
-        cx_local = cx_scene - self.model.x
-        cy_local = cy_scene - self.model.y
-        return QtCore.QPointF(cx_local, cy_local), r
-
         # 仅当 enabled 为 True 才允许矩形交互（移动/拉伸）
     def _rect_interactions_allowed(self) -> bool:
         return bool(self.model.enabled)
-
-    def _apply_enabled_flags(self):
-        movable = self._rect_interactions_allowed()
-        self.setFlag(QtWidgets.QGraphicsItem.ItemIsMovable, movable)
-        # （可选）禁用时降低红框高亮感
-        if not movable:
-            self._hl_rect = False
 
     def _current_click_local(self) -> Tuple[QtCore.QPointF, float, float, str]:
         """
@@ -162,11 +113,11 @@ class CatItem(QtWidgets.QGraphicsObject):
         rect = self._current_rect_local()
         w, h = rect.width(), rect.height()
 
-        cx_abs = self.model.click_cx
-        cy_abs = self.model.click_cy
-        a = self.model.click_a
-        b = self.model.click_b
-        shape = self.model.click_shape
+        cx_abs = self.model.ccx
+        cy_abs = self.model.ccy
+        a = self.model.ca
+        b = self.model.cb
+        shape = self.model.cshape
 
         # 回退（未自定义/无效）
         if cx_abs < 0 or cy_abs < 0 or a <= 0 or b <= 0:
@@ -189,8 +140,7 @@ class CatItem(QtWidgets.QGraphicsObject):
         cx_local, cy_local = self._clamp_center_to_scene(local_cx, local_cy, a, b)
         return QtCore.QPointF(cx_local, cy_local), float(a), float(b), shape
 
-
-    def _click_handles(self, c: QtCore.QPointF, a: float, b: float, shape: str):
+    def _click_handles(self, c: QtCore.QPointF, a: float, b: float):
         """
         始终返回 8 个手柄：TL/TR/BR/BL（角） + L/R/T/B（边）
         a,b 为半轴（rect=半宽/半高；ellipse=长/短轴）
@@ -211,13 +161,6 @@ class CatItem(QtWidgets.QGraphicsObject):
 
         return {"TL": TL, "TR": TR, "BR": BR, "BL": BL,
                 "L": L, "R": R, "T": T, "B": B}
-
-    def _drawRectCrisp(self, p: QtGui.QPainter, rect: QtCore.QRectF):
-        p.save()
-        p.translate(0.5, 0.5)
-        r = QtCore.QRectF(int(rect.x()), int(rect.y()), int(rect.width()), int(rect.height()))
-        p.drawRect(r)
-        p.restore()
 
     # -------------------- 绘制 --------------------
     # —— 小徽标绘制工具 —— #
@@ -279,69 +222,22 @@ class CatItem(QtWidgets.QGraphicsObject):
 
     def paint(self, p: QtGui.QPainter, option, widget=None):
         p.setRenderHints(QtGui.QPainter.RenderHint(0))
-        rect = self._current_rect_local()
 
         # 矩形
         if self._show_rect:
-            if self._hl_rect:
-                pen = self.PEN_RECT_HL; base_brush = self.BRUSH_RECT_HL
-            else:
-                pen = self.PEN_RECT;    base_brush = self.BRUSH_RECT
+            rect = self._current_rect_local()
+            p.setPen(self.PEN_RECT if not self._hl_rect else self.PEN_RECT_HL)
+            p.setBrush(self.BRUSH_RECT if not self._hl_rect else self.BRUSH_RECT_HL)
+            pen = self.PEN_RECT;    base_brush = self.BRUSH_RECT
             p.setPen(pen)
             col = QtGui.QColor(base_brush.color())
             if self._extern_selected:
                 col.setAlpha(min(255, self._selected_alpha))
             p.setBrush(QtGui.QBrush(col))
             p.drawRect(rect)
+            self._draw_badge(p, rect, str(self._ordinal), corner="lt", d=20.0, pad=4.0)
 
-        # 本侧显示（沿用 up/down 逻辑）
-        visible_for_side = (self.model.section == 'up') == self.is_up
-
-        # 圆
-        if self._show_circle:
-            c, r = self._current_circle_local()             # 先算
-            lvl = max(1, min(int(self.model.hint_level), len(RADIUS_LEVELS)))
-            pm  = CirclePixmapProvider.instance().get(lvl)
-            bbox = self._circle_pixmap_bbox()
-            if bbox:
-                p.drawPixmap(bbox.topLeft(), pm)            # PNG 按 bbox 放置
-                self._draw_badge(p, bbox, str(self._ordinal), corner="lt", d=20.0, pad=4.0)
-
-            if self._hl_circle:
-                p.save()
-                p.setRenderHint(QtGui.QPainter.Antialiasing, True)
-                # A) 外沿描边
-                p.setPen(QtGui.QPen(QtGui.QColor('#00e676'), 2.5))
-                p.setBrush(QtCore.Qt.NoBrush)
-                p.drawEllipse(bbox)
-                # B) 光晕环（外扩一圈）
-                glow = 8.0
-                outer = bbox.adjusted(-glow, -glow, glow, glow)
-                path_outer = QtGui.QPainterPath(); path_outer.addEllipse(outer)
-                path_inner = QtGui.QPainterPath(); path_inner.addEllipse(bbox)
-                ring = path_outer.subtracted(path_inner)
-                p.setPen(QtCore.Qt.NoPen)
-                p.setBrush(QtGui.QColor(0, 230, 118, 40))
-                p.drawPath(ring)
-                p.restore()
-
-        # 文本：居中 + 自动换行 + 字号自适配
-        label = (self.model.label or "").strip()
-        if visible_for_side and self._show_label and label:
-            rect_local = self._current_rect_local()
-            # 给文字留一点内边距
-            pad = max(4.0, min(rect_local.width(), rect_local.height()) * 0.06)
-            text_rect = rect_local.adjusted(pad, pad, -pad, -pad)
-            # 自适应字号
-            pt = self._compute_fitting_pointsize(text_rect.width(), text_rect.height(), label)
-            self._text_font.setPointSizeF(pt)
-            p.setFont(self._text_font)
-            p.setPen(QtGui.QPen(self._text_color))
-            flags = QtCore.Qt.AlignCenter | QtCore.Qt.TextWordWrap
-            p.drawText(text_rect, flags, label)
-
-        # 角把手
-        if self._show_rect:
+            # 角把手
             hs = self.HANDLE_SIZE
             p.setPen(self.HANDLE_PEN); p.setBrush(self.HANDLE_BR)
             tl = rect.topLeft(); tr = rect.topRight()
@@ -354,10 +250,7 @@ class CatItem(QtWidgets.QGraphicsObject):
             click_rect = QtCore.QRectF(c.x()-a, c.y()-b, 2*a, 2*b)
             p.setPen(self.PEN_CLICK if not self._hl_click else self.PEN_CLICK_HL)
             p.setBrush(self.BRUSH_CLICK if not self._hl_click else self.BRUSH_CLICK_HL)
-            if shape == "rect":
-                p.drawRect(click_rect)
-            else:  # ellipse
-                p.drawEllipse(QtCore.QRectF(c.x()-a, c.y()-b, 2*a, 2*b))
+            p.drawRect(click_rect)
             self._draw_badge(p, click_rect, str(self._ordinal), corner="lt", d=20.0, pad=4.0)
 
             hs = self.HANDLE_SIZE
@@ -393,11 +286,6 @@ class CatItem(QtWidgets.QGraphicsObject):
         rect = self._current_rect_local()
         uni  = QtCore.QRectF(rect)
 
-        if self._show_circle:
-            bbox = self._circle_pixmap_bbox()
-            if bbox:
-                uni = uni.united(bbox)
-
         if self._show_click:
             c, a, b, _ = self._current_click_local()
             click_rect = QtCore.QRectF(c.x()-a, c.y()-b, 2*a, 2*b)
@@ -425,13 +313,6 @@ class CatItem(QtWidgets.QGraphicsObject):
         rect = self._current_rect_local()
         path.addRect(rect)
 
-        if self._show_circle:
-            bbox = self._circle_pixmap_bbox()
-            if bbox:
-                circ = QtGui.QPainterPath()
-                circ.addRect(bbox)  # 用 PNG 的外接矩形，而不是几何圆
-                path = path.united(circ)
-
         if self._show_click:
             c, a, b, shape = self._current_click_local()
             click_rect = QtCore.QRectF(c.x()-a, c.y()-b, 2*a, 2*b)
@@ -457,34 +338,6 @@ class CatItem(QtWidgets.QGraphicsObject):
 
         return path
 
-    # ====== 文本字号自适配 ======
-    def _compute_fitting_pointsize(self, box_w: float, box_h: float, text: str) -> float:
-        if box_w <= 1 or box_h <= 1 or not text:
-            return 10.0
-        key = (int(box_w), int(box_h), text)
-        if self._text_cache_key == key:
-            return float(self._text_cached_pt)
-
-        lo, hi = 8.0, max(14.0, box_h * 0.9)
-        best = lo
-        test_font = QtGui.QFont(self._text_font)
-        test_rect = QtCore.QRect(0, 0, int(box_w), 10_000)
-        flags = QtCore.Qt.AlignCenter | QtCore.Qt.TextWordWrap | QtCore.Qt.TextWrapAnywhere
-
-        while hi - lo > 0.5:
-            mid = (lo + hi) / 2.0
-            test_font.setPointSizeF(mid)
-            fm = QtGui.QFontMetrics(test_font)
-            br = fm.boundingRect(test_rect, flags, text)
-            if br.height() <= box_h and br.width() <= box_w:
-                best = mid; lo = mid
-            else:
-                hi = mid
-
-        self._text_cache_key = key
-        self._text_cached_pt = float(best)
-        return float(best)
-
     # -------------------- hover：高亮 + 指针 --------------------
     def hoverMoveEvent(self, e: QtWidgets.QGraphicsSceneHoverEvent) -> None:
         if self._is_resizing:
@@ -500,58 +353,50 @@ class CatItem(QtWidgets.QGraphicsObject):
                 elif hcode in ("T","B"): self.setCursor(QtCore.Qt.SizeVerCursor)
                 elif hcode in ("TL", "BR"): self.setCursor(QtCore.Qt.SizeFDiagCursor)
                 else : self.setCursor(QtCore.Qt.SizeBDiagCursor)
-                self._set_hover_state(rect_hl=False, circ_hl=False, click_hl=True); return
+                self._set_hover_state(rect_hl=False, click_hl=True)
+                return
 
             # 点击区域本体
             if self._hit_click_inside(pos):
                 self.setCursor(QtCore.Qt.OpenHandCursor)
-                self._set_hover_state(rect_hl=False, circ_hl=False, click_hl=True); return
-            
-        # 圆
-        if self._show_circle and self._hit_circle(pos):
-            self.setCursor(QtCore.Qt.OpenHandCursor)
-            self._set_hover_state(rect_hl=False, circ_hl=True, click_hl=False)
-            return
-        
+                self._set_hover_state(rect_hl=False, click_hl=True)
+                return
+
         # 矩形
         # 角优先
         if self._can_hit_rect():
             corner = self._hit_corner(rect, pos)
             if corner >= 0:
                 self.setCursor(QtCore.Qt.SizeFDiagCursor if corner in (0, 2) else QtCore.Qt.SizeBDiagCursor)
-                self._set_hover_state(rect_hl=True, circ_hl=False, click_hl=False)
+                self._set_hover_state(rect_hl=True, click_hl=False)
                 return
 
             # 边
             edge = self._hit_edge(rect, pos)
             if edge:
                 self.setCursor(QtCore.Qt.SizeHorCursor if edge in ('L','R') else QtCore.Qt.SizeVerCursor)
-                self._set_hover_state(rect_hl=True, circ_hl=False, click_hl=False)
+                self._set_hover_state(rect_hl=True, click_hl=False)
                 return
-
-        
 
             # 矩形内部也高亮
             if self._show_rect and rect.contains(pos):
                 self.setCursor(QtCore.Qt.OpenHandCursor)
-                self._set_hover_state(rect_hl=True, circ_hl=False, click_hl=False)
+                self._set_hover_state(rect_hl=True, click_hl=False)
                 return
 
         # self.setCursor(QtCore.Qt.OpenHandCursor)
-        self._set_hover_state(rect_hl=False, circ_hl=False, click_hl=False)
+        self._set_hover_state(rect_hl=False, click_hl=False)
         super().hoverMoveEvent(e)
 
     def hoverLeaveEvent(self, e: QtWidgets.QGraphicsSceneHoverEvent) -> None:
         self.unsetCursor()
-        self._set_hover_state(rect_hl=False, circ_hl=False, click_hl=False)
+        self._set_hover_state(rect_hl=False, click_hl=False)
         super().hoverLeaveEvent(e)
 
-    def _set_hover_state(self, rect_hl: bool, circ_hl: bool, click_hl: bool=False):
+    def _set_hover_state(self, rect_hl: bool, click_hl: bool=False):
         changed = False
         if self._hl_rect != rect_hl:
             self._hl_rect = rect_hl; changed = True
-        if self._hl_circle != circ_hl:
-            self._hl_circle = circ_hl; changed = True
         if self._hl_click != click_hl:
             self._hl_click = click_hl; changed = True
         if changed:
@@ -581,17 +426,6 @@ class CatItem(QtWidgets.QGraphicsObject):
                 self.setCursor(QtCore.Qt.ClosedHandCursor)
                 e.accept(); return
 
-        # 圆命中优先
-        if self._can_hit_circle() and self._hit_circle(e.pos()):
-            if not self._show_circle:
-                return False
-            self._mode = self.Mode.DRAG_CIRCLE
-            self.setCursor(QtCore.Qt.ClosedHandCursor)
-            # 记录按下时圆心
-            center, _ = self._current_circle_local()
-            self._press_center = QtCore.QPointF(center)
-            e.accept(); return
-        
         if self._can_hit_rect():
             # 角
             corner = self._hit_corner(rect, e.pos())
@@ -667,27 +501,9 @@ class CatItem(QtWidgets.QGraphicsObject):
 
             tl_scene, br_scene = self._clamp_scene_rect(tl_scene, br_scene, scene_rect)
             x, y, w, h = tl_scene.x(), tl_scene.y(), br_scene.x()-tl_scene.x(), br_scene.y()-tl_scene.y()
-            self.model.set_rect(x, y, max(MIN_RECT_SIZE, w), max(MIN_RECT_SIZE, h), source=self)
+            self.model.set_rect(x, y, max(MIN_RECT_SIZE, w), max(MIN_RECT_SIZE, h))
             e.accept(); return
 
-        if self._mode == self.Mode.DRAG_CIRCLE:
-            # 目标圆心（场景坐标）
-            cx_scene = e.scenePos().x()
-            cy_scene = e.scenePos().y()
-
-            # 半径
-            _, r = self._current_circle_local()
-
-            # 场景夹紧（可选）
-            scene = self.scene()
-            scene_rect = scene.sceneRect() if scene else QtCore.QRectF(-1e6, -1e6, 2e6, 2e6)
-            cx_scene = max(scene_rect.left() + r,  min(cx_scene, scene_rect.right()  - r))
-            cy_scene = max(scene_rect.top()  + r,  min(cy_scene, scene_rect.bottom() - r))
-
-            # ★ 写回“绝对（场景）坐标”
-            self.model.set_circle(cx_scene, cy_scene, source=self)
-            e.accept(); return
-        
         if self._mode in (self.Mode.CLICK_MOVE, self.Mode.CLICK_EDGE, self.Mode.CLICK_CORNER):
             rect = self._current_rect_local()
             w, h = rect.width(), rect.height()
@@ -716,7 +532,7 @@ class CatItem(QtWidgets.QGraphicsObject):
                 cy_scene = min(max(scene_rect.top()   + b_fix, cy_scene), scene_rect.bottom() - b_fix)
 
                 # 写回绝对坐标
-                self.model.set_click_center(cx_scene, cy_scene, source=self)
+                self.model.set_click_center(cx_scene, cy_scene)
                 e.accept(); return
 
             if self._mode == self.Mode.CLICK_EDGE:
@@ -739,7 +555,7 @@ class CatItem(QtWidgets.QGraphicsObject):
                 a_new = max(1.0, min(float(a_new), max_a))
                 b_new = max(1.0, min(float(b_new), max_b))
 
-                self.model.set_click_axes(a_new, b_new, source=self)
+                self.model.set_click_axes(a_new, b_new)
                 e.accept(); return
             if self._mode == self.Mode.CLICK_CORNER:
                 cx_loc, cy_loc = cx, cy  # 局部中心保持不变
@@ -763,7 +579,7 @@ class CatItem(QtWidgets.QGraphicsObject):
                 a_new = max(1.0, min(float(a_new), max_a))
                 b_new = max(1.0, min(float(b_new), max_b))
 
-                self.model.set_click_axes(a_new, b_new, source=self)
+                self.model.set_click_axes(a_new, b_new)
                 e.accept(); return
 
         e.ignore()
@@ -771,7 +587,6 @@ class CatItem(QtWidgets.QGraphicsObject):
     def mouseReleaseEvent(self, e: QtWidgets.QGraphicsSceneMouseEvent):
         self._mode = self.Mode.NONE
         self._is_resizing = False
-        self.updateEnabledFlags()
         self.setCursor(QtCore.Qt.OpenHandCursor)
         if callable(self._on_change):
             try:
@@ -779,77 +594,6 @@ class CatItem(QtWidgets.QGraphicsObject):
             except Exception:
                 pass
         super().mouseReleaseEvent(e)
-
-    def contextMenuEvent(self, e: QtWidgets.QGraphicsSceneContextMenuEvent) -> None:
-        if not self._show_click:
-            return super().contextMenuEvent(e)
-
-        pos = e.pos()
-        hit_handle = self._hit_click_handle(pos)
-        hit_inside = self._hit_click_inside(pos)
-        if not (hit_handle or hit_inside):
-            return super().contextMenuEvent(e)
-
-        # 当前形状
-        _, _, _, shape = self._current_click_local()
-
-        menu = QtWidgets.QMenu(self.scene().views()[0] if self.scene() and self.scene().views() else None)
-        act_toggle = menu.addAction("改为椭圆" if shape == "rect" else "改为矩形")
-
-        # 关键修复：把 screenPos 处理成 QPoint
-        sp = e.screenPos()
-        if isinstance(sp, QtCore.QPointF):
-            global_pt = sp.toPoint()
-        else:
-            global_pt = sp  # 已经是 QPoint
-
-        chosen = menu.exec(global_pt)  # 这里传 QPoint 即可
-        if chosen is None:
-            e.accept(); return
-
-        if chosen == act_toggle:
-            new_shape = "ellipse" if shape == "rect" else "rect"
-            self.model.set_click_shape(new_shape, source=self)
-            if hasattr(self, "_refresh_bounds_if_needed"):
-                self._refresh_bounds_if_needed()
-            self.update()
-            if (callable(self._on_change)):
-                try:
-                    self._on_change(self.model.id)
-                except Exception:
-                    pass
-            e.accept(); return
-
-        e.accept()
-
-    # -------------------- itemChange：移动夹紧并写回 model --------------------
-    def itemChange(self, change, value):
-        if change == QtWidgets.QGraphicsItem.ItemSceneHasChanged:
-            if value is None:
-                self._unregister_model_peer()
-            return super().itemChange(change, value)
-
-        if change == QtWidgets.QGraphicsItem.ItemPositionChange and self.scene():
-            if self._syncing_from_model:
-                return value
-            if not self._rect_interactions_allowed():
-                return QtCore.QPointF(self.pos())
-            # 夹到场景
-            new_pos: QtCore.QPointF = value
-            rect = self._current_rect_local()
-            scene_rect = self.scene().sceneRect()
-            new_x = max(scene_rect.left(),  min(new_pos.x(), scene_rect.right()  - rect.width()))
-            new_y = max(scene_rect.top(),   min(new_pos.y(), scene_rect.bottom() - rect.height()))
-            return QtCore.QPointF(new_x, new_y)
-
-        if change == QtWidgets.QGraphicsItem.ItemPositionHasChanged:
-            # 把移动写回 model（尺寸不变）
-            if self._rect_interactions_allowed() and not self._syncing_from_model:
-                rect = self._current_rect_local()
-                self.model.set_rect(self.pos().x(), self.pos().y(), rect.width(), rect.height(), source=self)
-                self._notify_peers()
-            return super().itemChange(change, value)
-        return super().itemChange(change, value)
 
     # -------------------- 命中工具 --------------------
 
@@ -882,24 +626,7 @@ class CatItem(QtWidgets.QGraphicsObject):
             if abs(pos.y()-0.0)            <= et: return 'T'
             if abs(pos.y()-rect.height())  <= et: return 'B'
         return ''
-    
-    
 
-    def _hit_circle(self, pos: QtCore.QPointF) -> bool:
-        if not self._can_hit_circle():
-            return False
-        bbox = self._circle_pixmap_bbox()
-        if not bbox:
-            # 无 PNG 时退回旧的“半径判定”
-            c, r = self._current_circle_local()
-            pad = self._scene_pick_radius(4.0)
-            return QtCore.QLineF(pos, c).length() <= (r + pad)
-
-        # 轻微外扩，提升命中手感
-        pad = self._scene_pick_radius(3.0)
-        hit = bbox.adjusted(-pad, -pad, pad, pad)
-        return hit.contains(pos)
-    
     def _hit_click_handle(self, pos):
         if not self._can_hit_click():
             return None
@@ -963,27 +690,6 @@ class CatItem(QtWidgets.QGraphicsObject):
         # 回到局部
         return cx_scene - self.model.x, cy_scene - self.model.y
 
-    def _clamp_click_to_scene(self, cx, cy, a, b, shape: str):
-        scene_rect = self.scene().sceneRect() if self.scene() else QtCore.QRectF(-1e6,-1e6,2e6,2e6)
-        # 中心（场景）
-        cx_scene = self.model.x + cx
-        cy_scene = self.model.y + cy
-
-        # 允许超出红框，但保证在场景内完整可见
-        max_a = min(cx_scene - scene_rect.left(), scene_rect.right() - cx_scene)
-        max_b = min(cy_scene - scene_rect.top(),  scene_rect.bottom() - cy_scene)
-        max_a = max(1.0, float(max_a))
-        max_b = max(1.0, float(max_b))
-
-        a = max(1.0, min(float(a), max_a))
-        b = max(1.0, min(float(b), max_b))
-
-        cx_scene = max(scene_rect.left()  + a, min(cx_scene, scene_rect.right()  - a))
-        cy_scene = max(scene_rect.top()   + b, min(cy_scene, scene_rect.bottom() - b))
-
-        return cx_scene - self.model.x, cy_scene - self.model.y, a, b
-
-
     # -------------------- 外部 API --------------------
     def setOrdinal(self, n: int):
         n = max(1, int(n))
@@ -991,22 +697,15 @@ class CatItem(QtWidgets.QGraphicsObject):
             self._ordinal = n
             self.update()
 
-    def updateEnabledFlags(self):
-        self._apply_enabled_flags()
-        self.update()
-
     def setVis(self, show_click: bool, show_rect: bool):
         # 这里仍可扩展：若需要真正的“隐藏圆/矩形/文字”，可以加局部变量控制
         # 简化起见，先保持全部显示；如需开关，可仿照原有结构加 3 个布尔并在 paint 中判断
         changed = False
         if self._show_click  != bool(show_click):  self._show_click  = bool(show_click);  changed = True
         if self._show_rect   != bool(show_rect):   self._show_rect   = bool(show_rect);   changed = True
-        if self._show_circle != bool(show_circle): self._show_circle = bool(show_circle); changed = True
-        if self._show_label  != bool(show_label):  self._show_label  = bool(show_label);  changed = True
         if changed:
             # 关闭矩形时去掉矩形高亮；关闭圆时去掉圆高亮
             if not self._show_rect:   self._hl_rect = False
-            if not self._show_circle: self._hl_circle = False
             if not self._show_click:  self._hl_click = False
             self._refresh_bounds_if_needed()
             self.update()
