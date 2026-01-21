@@ -556,6 +556,13 @@ class EditorWindow(QtWidgets.QMainWindow):
             QtWidgets.QApplication.processEvents(QtCore.QEventLoop.AllEvents, 50)
 
             # 使用裁剪结果生成预览/绿圈四宫格
+            try:
+                src_img = self.pair.image_path_a
+                dst_img = os.path.join(level_dir, "A", f"{self.name}_origin{self.ext or '.png'}")
+                if os.path.isfile(src_img):
+                    shutil.copy2(src_img, dst_img)
+            except Exception:
+                pass
             compose_result(level_dir, self.name, self.ext, self.cats)
             success = True
             QtWidgets.QMessageBox.information(self, "生成完成", "区域图与预览已生成")
@@ -603,8 +610,7 @@ class EditorWindow(QtWidgets.QMainWindow):
             src_img = self.pair.image_path_a
             if os.path.isfile(src_img):
                 dst_img = os.path.join(level_dir, "A", f"{file_name}_origin{file_ext}")
-                if not os.path.exists(dst_img):
-                    shutil.copy2(src_img, dst_img)
+                shutil.copy2(src_img, dst_img)
         except Exception:
             pass
 

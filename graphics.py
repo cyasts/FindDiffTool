@@ -346,7 +346,7 @@ class CatItem(QtWidgets.QGraphicsObject):
 
             # ★ 关键：把 8 个手柄“泡泡”并入 shape（角点在椭圆外也能接收事件）
             pick = self._scene_pick_radius(12.0)
-            handles = self._click_handles(c, a, b, shape)
+            handles = self._click_handles(c, a, b)
             handle_path = QtGui.QPainterPath()
             for pt in handles.values():
                 handle_path.addEllipse(QtCore.QRectF(pt.x()-pick, pt.y()-pick, 2*pick, 2*pick))
