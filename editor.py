@@ -234,7 +234,6 @@ class EditorWindow(QtWidgets.QMainWindow):
             ccy=y + size/2,
             ca=size/2,
             cb=size/2,
-            cshape='rect'
         )
         self.cats.append(cat)
         self._add_rect_items(cat)
@@ -586,7 +585,6 @@ class EditorWindow(QtWidgets.QMainWindow):
                 d.ccy = d.y + d.height / 2
                 d.ca = d.width / 2
                 d.cb = d.height / 2
-                d.cshape = 'rect'
 
         cur = self.toggle_click_region.isChecked()
         self.toggle_click_region.setChecked(not cur)
@@ -669,7 +667,6 @@ class EditorWindow(QtWidgets.QMainWindow):
                     "click_y": ccy,
                     "click_a": d.ca,
                     "click_b": d.cb,
-                    "click_type": d.cshape
                 })
 
             data["differences"].append(entry)
@@ -753,7 +750,6 @@ class EditorWindow(QtWidgets.QMainWindow):
             has_click_fields = ('click_x' in cat and 'click_y' in cat and
                                 'click_a' in cat and 'click_b' in cat)
             use_custom = click_customized and has_click_fields
-            shape = str(cat.get('click_type', 'rect'))  # 'rect' | 'ellipse' | 'circle'(如有)
 
             if use_custom:
                 # click_x/click_y 为百分比(0~1)，反归一化为像素；a/b 按当前写法为像素半轴
@@ -769,7 +765,7 @@ class EditorWindow(QtWidgets.QMainWindow):
 
             d = Cat(
                 id=str(cat.get('id', now_id())),
-                name=str(cat.get('name', f"不同点 {len(self.cats) + 1}")),
+                name=str(cat.get('name', f"序号 {len(self.cats) + 1}")),
                 enabled=bool(cat.get('enabled', True)),
                 visible=True,
                 x=min_x,
@@ -777,7 +773,6 @@ class EditorWindow(QtWidgets.QMainWindow):
                 width=max(MIN_RECT_SIZE, max_x - min_x),
                 height=max(MIN_RECT_SIZE, max_y - min_y),
                 click_customized=use_custom,
-                cshape=shape,
                 ccx=float(ccx_abs),
                 ccy=float(ccy_abs),
                 ca=float(ca),

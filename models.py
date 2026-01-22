@@ -20,7 +20,6 @@ class Cat:
     ccy: float = -1.0
     ca: float = 0.0 #长轴（rect为半宽，ellipse为长轴）
     cb: float = 0.0 #短轴（rect为半高，ellipse为短轴）
-    cshape: str = 'rect' # 'rect' | 'ellipse' | 'None'
 
     def set_rect(self, x, y, w, h) :
         self.x = x

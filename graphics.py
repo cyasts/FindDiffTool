@@ -123,9 +123,9 @@ class CatItem(QtWidgets.QGraphicsObject):
     def _rect_interactions_allowed(self) -> bool:
         return bool(self.model.enabled)
 
-    def _current_click_local(self) -> Tuple[QtCore.QPointF, float, float, str]:
+    def _current_click_local(self) -> Tuple[QtCore.QPointF, float, float]:
         """
-        返回 (局部中心, a, b, shape)；不对中心和半轴做红框约束。
+        返回 (局部中心, a, b)；不对中心和半轴做红框约束。
         回退：若参数缺省/无效，使用红框中心和半轴；圆强制 a==b。
         """
         rect = self._current_rect_local()
@@ -135,18 +135,10 @@ class CatItem(QtWidgets.QGraphicsObject):
         cy_abs = self.model.ccy
         a = self.model.ca
         b = self.model.cb
-        shape = self.model.cshape
 
         # 回退（未自定义/无效）
         if cx_abs < 0 or cy_abs < 0 or a <= 0 or b <= 0:
-            c = QtCore.QPointF(w/2, h/2)
-            if shape == "rect":
-                a, b = w/2, h/2
-            else:
-                r = min(w, h) / 2
-                a = b = r
-                shape = "ellipse"
-            return c, float(a), float(b), shape
+            a, b = w/2, h/2
 
         # 绝对 → 本地（不夹紧到红框）
         local_cx = cx_abs - self.model.x
@@ -156,7 +148,7 @@ class CatItem(QtWidgets.QGraphicsObject):
         a = max(1.0, float(a))
         b = max(1.0, float(b))
         cx_local, cy_local = self._clamp_center_to_scene(local_cx, local_cy, a, b)
-        return QtCore.QPointF(cx_local, cy_local), float(a), float(b), shape
+        return QtCore.QPointF(cx_local, cy_local), float(a), float(b)
 
     def _click_handles(self, c: QtCore.QPointF, a: float, b: float):
         """
@@ -263,7 +255,7 @@ class CatItem(QtWidgets.QGraphicsObject):
                 p.drawEllipse(QtCore.QRectF(ptc.x()-hs/2, ptc.y()-hs/2, hs, hs))
 
         if self.model.click_customized and self._show_click:
-            c, a, b, shape = self._current_click_local()
+            c, a, b = self._current_click_local()
             click_rect = QtCore.QRectF(c.x()-a, c.y()-b, 2*a, 2*b)
             p.setPen(self.PEN_CLICK if not self._hl_click else self.PEN_CLICK_HL)
             p.setBrush(self.BRUSH_CLICK if not self._hl_click else self.BRUSH_CLICK_HL)
@@ -272,7 +264,7 @@ class CatItem(QtWidgets.QGraphicsObject):
 
             hs = self.HANDLE_SIZE
             p.setPen(self.HANDLE_PEN); p.setBrush(self.HANDLE_BR_CLICK)
-            for ptc in self._click_handles(c, a, b, shape).values():
+            for ptc in self._click_handles(c, a, b).values():
                 p.drawEllipse(QtCore.QRectF(ptc.x()-hs/2, ptc.y()-hs/2, hs, hs))
 
     def _scene_pick_radius(self, px: float = 12.0) -> float:
@@ -298,13 +290,13 @@ class CatItem(QtWidgets.QGraphicsObject):
         rect_in_scene = inv.mapRect(QtCore.QRectF(0.0, 0.0, float(px), float(px)))
         # 最小兜底，避免过小导致难命中
         return max(2.0, rect_in_scene.width())
-    
+
     def _compute_bounds_union(self) -> QtCore.QRectF:
         rect = self._current_rect_local()
         uni  = QtCore.QRectF(rect)
 
         if self._show_click:
-            c, a, b, _ = self._current_click_local()
+            c, a, b = self._current_click_local()
             click_rect = QtCore.QRectF(c.x()-a, c.y()-b, 2*a, 2*b)
             uni = uni.united(click_rect)
 
@@ -331,13 +323,10 @@ class CatItem(QtWidgets.QGraphicsObject):
         path.addRect(rect)
 
         if self.model.click_customized and self._show_click:
-            c, a, b, shape = self._current_click_local()
+            c, a, b = self._current_click_local()
             click_rect = QtCore.QRectF(c.x()-a, c.y()-b, 2*a, 2*b)
             click = QtGui.QPainterPath()
-            if shape == "rect":
-                click.addRect(click_rect)
-            else:
-                click.addEllipse(click_rect)
+            click.addRect(click_rect)
 
             # 椭圆边沿粗描边（整条边易点）
             stroker = QtGui.QPainterPathStroker()
@@ -433,14 +422,14 @@ class CatItem(QtWidgets.QGraphicsObject):
                 self._mode = self.Mode.CLICK_EDGE if hcode in ("L","R","T","B") else self.Mode.CLICK_CORNER
                 self._click_hcode = hcode
                 self._click_press_local = e.pos()
-                self._click_press_center, self._click_press_a, self._click_press_b, self._click_press_shape = self._current_click_local()
+                self._click_press_center, self._click_press_a, self._click_press_b = self._current_click_local()
                 self.setCursor(QtCore.Qt.ClosedHandCursor)
                 e.accept(); return
             # 点击区域本体
             if self._hit_click_inside(e.pos()):
                 self._mode = self.Mode.CLICK_MOVE
                 self._click_press_local = e.pos()
-                self._click_press_center, self._click_press_a, self._click_press_b, self._click_press_shape = self._current_click_local()
+                self._click_press_center, self._click_press_a, self._click_press_b = self._current_click_local()
                 self.setCursor(QtCore.Qt.ClosedHandCursor)
                 e.accept(); return
 
@@ -533,7 +522,7 @@ class CatItem(QtWidgets.QGraphicsObject):
             w, h = rect.width(), rect.height()
             cur = self.mapFromScene(e.scenePos())
 
-            c0, a0, b0, shape = self._click_press_center, self._click_press_a, self._click_press_b, self._click_press_shape
+            c0, a0, b0 = self._click_press_center, self._click_press_a, self._click_press_b
             cx, cy = c0.x(), c0.y()
             a, b = a0, b0
 
@@ -589,17 +578,8 @@ class CatItem(QtWidgets.QGraphicsObject):
                 e.accept(); return
             if self._mode == self.Mode.CLICK_CORNER:
                 cx_loc, cy_loc = cx, cy  # 局部中心保持不变
-                if shape == "rect":
-                    a_new = abs(cur.x() - cx_loc)
-                    b_new = abs(cur.y() - cy_loc)
-                else:
-                    # 椭圆：等比缩放
-                    v0 = self._click_press_local - c0
-                    v1 = cur - c0
-                    len0 = max(1e-6, QtCore.QLineF(QtCore.QPointF(0, 0), v0).length())
-                    s = QtCore.QLineF(QtCore.QPointF(0, 0), v1).length() / len0
-                    a_new = max(1.0, a0 * s)
-                    b_new = max(1.0, b0 * s)
+                a_new = abs(cur.x() - cx_loc)
+                b_new = abs(cur.y() - cy_loc)
 
                 # 只夹半轴：以中心为锚，半轴不得越出场景
                 cx_scene = self.model.x + cx_loc
@@ -679,8 +659,8 @@ class CatItem(QtWidgets.QGraphicsObject):
     def _hit_click_handle(self, pos):
         if not self._can_hit_click():
             return None
-        c, a, b, shape = self._current_click_local()
-        handles = self._click_handles(c, a, b, shape)
+        c, a, b = self._current_click_local()
+        handles = self._click_handles(c, a, b)
         pick_edge   = self._scene_pick_radius(16.0)  # L/R/T/B 更宽松
         pick_corner = self._scene_pick_radius(12.0)
 
@@ -691,16 +671,13 @@ class CatItem(QtWidgets.QGraphicsObject):
             if code in handles and QtCore.QLineF(pos, handles[code]).length() <= pick_corner:
                 return code
         return None
-    
+
     def _hit_click_inside(self, pos: QtCore.QPointF) -> bool:
         if not self._can_hit_click():
-            return None
-        c, a, b, shape = self._current_click_local()
+            return False
+        c, a, b = self._current_click_local()
         dx, dy = pos.x()-c.x(), pos.y()-c.y()
-        if shape == "rect":
-            return abs(dx) <= a and abs(dy) <= b
-        # ellipse
-        return (dx*dx)/(a*a+1e-6) + (dy*dy)/(b*b+1e-6) <= 1.0
+        return abs(dx) <= a and abs(dy) <= b
 
     # -------------------- 场景几何工具 --------------------
     def _clamp_scene_rect(self, tl: QtCore.QPointF, br: QtCore.QPointF,
