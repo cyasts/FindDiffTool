@@ -60,6 +60,11 @@ class ImageView(QtWidgets.QGraphicsView):
     # ---- 滚轮缩放（以鼠标指针为中心） ----
 
     def wheelEvent(self, event: QtGui.QWheelEvent) -> None:
+        # 仅在按住 Cmd（macOS）/ Ctrl（Windows）时才缩放，否则忽略滚轮
+        if not (event.modifiers() & QtCore.Qt.ControlModifier):
+            event.accept()
+            return
+
         # 计算缩放因子
         angle = event.angleDelta().y()
         if angle == 0:

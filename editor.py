@@ -4,12 +4,14 @@ from typing import Dict, List, Optional, Tuple
 from PySide6 import QtCore, QtGui, QtWidgets
 
 from utils import compose_result, quantize_roi
-from models import Difference, RADIUS_LEVELS, MIN_RECT_SIZE,CATEGORY_COLOR_MAP
+from models import Difference, RADIUS_LEVELS, MIN_RECT_SIZE, CATEGORY_COLOR_MAP
 from scenes import ImageScene, ImageView
 from graphics import DifferenceItem
 
+
 def now_id() -> str:
     return uuid.uuid4().hex
+
 
 def clamp_level(level: int) -> int:
     """把 level 夹到 1..len(RADIUS_LEVELS)。"""
@@ -20,8 +22,11 @@ def clamp_level(level: int) -> int:
         lvl = 1
     return 1 if lvl < 1 else (n if lvl > n else lvl)
 
+
 class DifferenceEditorWindow(QtWidgets.QMainWindow):
-    def __init__(self, entry, config_dir: str, parent: Optional[QtWidgets.QWidget] = None) -> None:
+    def __init__(
+        self, entry, config_dir: str, parent: Optional[QtWidgets.QWidget] = None
+    ) -> None:
         super().__init__(parent)
         self.entry = entry
         self.config_dir = config_dir
@@ -92,14 +97,12 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
         self.btn_close = QtWidgets.QPushButton("关闭")
 
         self.btn_gen_click_region = QtWidgets.QPushButton("生成点击区域")
-        self.btn_regen_circle = QtWidgets.QPushButton("生成")
 
         bottom_layout.addWidget(self.total_count)
         bottom_layout.addWidget(self.btn_save)
         bottom_layout.addWidget(self.btn_close)
         bottom_layout.addStretch(1)
         bottom_layout.addWidget(self.btn_gen_click_region)
-        bottom_layout.addWidget(self.btn_regen_circle)
         bottom_layout.addStretch(1)
         bottom_layout.addWidget(self.toggle_click_region)
         bottom_layout.addWidget(self.toggle_regions)
@@ -107,8 +110,15 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
         vbox_root.addWidget(bottom, 0)
 
         # Ensure vertical centering of buttons and controls
-        for w in [self.total_count, self.btn_save, self.btn_close, self.btn_gen_click_region, self.btn_regen_circle,
-                  self.toggle_click_region, self.toggle_regions, self.toggle_hints]:
+        for w in [
+            self.total_count,
+            self.btn_save,
+            self.btn_close,
+            self.btn_gen_click_region,
+            self.toggle_click_region,
+            self.toggle_regions,
+            self.toggle_hints,
+        ]:
             bottom_layout.setAlignment(w, QtCore.Qt.AlignVCenter)
 
         self.status_bar = QtWidgets.QStatusBar(self)
@@ -121,7 +131,7 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
         self._syncing_rect_update: bool = False
         self._syncing_selection: bool = False
         self._suppress_scene_selection: bool = False
-        self.status: str = 'unsaved'
+        self.status: str = "unsaved"
         # dirty state for title asterisk
         self._is_dirty: bool = False
         self._selected_diff_id: Optional[str] = None
@@ -131,17 +141,21 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
         self.btn_close.clicked.connect(self.close)
 
         self.btn_gen_click_region.clicked.connect(self.on_generate_click_regions)
-        self.btn_regen_circle.clicked.connect(self.on_regen_circles)
 
         self.toggle_click_region.toggled.connect(self.refresh_visibility)
         self.toggle_regions.toggled.connect(self.refresh_visibility)
         self.toggle_hints.toggled.connect(self.refresh_visibility)
 
         # style buttons
-        self.btn_save.setStyleSheet("QPushButton{background:#0d6efd;color:#fff;padding:6px 14px;border-radius:6px;border:1px solid #0d6efd;} QPushButton:hover{background:#0b5ed7;border-color:#0b5ed7;}")
-        self.btn_close.setStyleSheet("QPushButton{background:#6c757d;color:#fff;padding:6px 14px;border-radius:6px;border:1px solid #6c757d;} QPushButton:hover{background:#545b62;border-color:#545b62;}")
-        self.btn_gen_click_region.setStyleSheet("QPushButton{background:#17a2b8;color:#fff;padding:6px 14px;border-radius:6px;border:1px solid #17a2b8;} QPushButton:hover{background:#138496;border-color:#138496;}")
-        self.btn_regen_circle.setStyleSheet("QPushButton{background:#17a2b8;color:#fff;padding:6px 14px;border-radius:6px;border:1px solid #17a2b8;} QPushButton:hover{background:#138496;border-color:#138496;}")
+        self.btn_save.setStyleSheet(
+            "QPushButton{background:#0d6efd;color:#fff;padding:6px 14px;border-radius:6px;border:1px solid #0d6efd;} QPushButton:hover{background:#0b5ed7;border-color:#0b5ed7;}"
+        )
+        self.btn_close.setStyleSheet(
+            "QPushButton{background:#6c757d;color:#fff;padding:6px 14px;border-radius:6px;border:1px solid #6c757d;} QPushButton:hover{background:#545b62;border-color:#545b62;}"
+        )
+        self.btn_gen_click_region.setStyleSheet(
+            "QPushButton{background:#17a2b8;color:#fff;padding:6px 14px;border-radius:6px;border:1px solid #17a2b8;} QPushButton:hover{background:#138496;border-color:#138496;}"
+        )
         self.total_count.setStyleSheet("color:#333;font-weight:500;")
 
         # initialize scenes/view
@@ -163,21 +177,21 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
         self._sc_save.activated.connect(self.on_save_clicked)
 
     def _update_window_title(self) -> None:
-        mark = "*" if getattr(self, '_is_dirty', False) else ""
+        mark = "*" if getattr(self, "_is_dirty", False) else ""
         self.setWindowTitle(f"找猫编辑器 - {self.entry.name}{mark}")
 
     def _make_dirty(self) -> None:
         self._is_dirty = True
         self._update_window_title()
-        self._update_status('unsaved')
+        self._update_status("unsaved")
 
     def _update_status(self, status: str) -> None:
         self.status = status
         text_map = {
-            'unsaved': '未保存',
-            'saved': '已保存',
+            "unsaved": "未保存",
+            "saved": "已保存",
         }
-        human = text_map.get(self.status, '未保存')
+        human = text_map.get(self.status, "未保存")
         self.status_bar.showMessage(f"状态：{human}")
 
     def update_total_count(self) -> None:
@@ -194,9 +208,11 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
         # 单按钮，类别固定为“修改”
         add_btn = QtWidgets.QPushButton("增加寻物目标")
         add_btn.setObjectName("btn_add_diff")
-        add_btn.clicked.connect(lambda _=False: self.add_difference('修改'))
-        color = CATEGORY_COLOR_MAP.get('修改', QtGui.QColor('#ff0000'))
-        add_btn.setStyleSheet(f"QPushButton {{ color: #fff; border:none; border-radius:14px; padding:6px 8px; background:{color.name()}; }}")
+        add_btn.clicked.connect(lambda _=False: self.add_difference("修改"))
+        color = CATEGORY_COLOR_MAP.get("修改", QtGui.QColor("#ff0000"))
+        add_btn.setStyleSheet(
+            f"QPushButton {{ color: #fff; border:none; border-radius:14px; padding:6px 8px; background:{color.name()}; }}"
+        )
         add_btn.setFixedHeight(34)
         layout.addWidget(add_btn, 0)
 
@@ -219,15 +235,14 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
     def add_difference(self, category: str) -> None:
         scene = self.scene
         r = scene.sceneRect()
-        size = min(r.width(), r.height()) * 0.2
-        size = max(MIN_RECT_SIZE, size)
+        size = 150.0
         margin = max(6.0, size * 0.05)  # 给一点内边距，手感更好
 
         rect = QtCore.QRectF(r.left() + margin, r.bottom() - margin - size, size, size)
         diff = Difference(
             id=now_id(),
             name=f"寻物目标 {len(self.differences) + 1}",
-            section="down", # legacy for config compat
+            section="down",  # legacy for config compat
             category=category or "",
             label="",
             enabled=True,
@@ -244,7 +259,7 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
             ccy=rect.center().y(),
             ca=rect.width() / 2,
             cb=rect.height() / 2,
-            cshape='rect'
+            cshape="rect",
         )
         self.differences.append(diff)
         self._add_rect_items(diff)
@@ -252,12 +267,11 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
         self._make_dirty()
         self.update_total_count()
 
-
-    def _on_item_chaned(self, diff_id: str)->None:
+    def _on_item_chaned(self, diff_id: str) -> None:
         self._make_dirty()
 
     def _add_rect_items(self, diff: Difference) -> None:
-        color = CATEGORY_COLOR_MAP.get(diff.category, QtGui.QColor('#ff0000'))
+        color = CATEGORY_COLOR_MAP.get(diff.category, QtGui.QColor("#ff0000"))
         item = DifferenceItem(diff, color, on_change=self._on_item_chaned, is_up=False)
         self.scene.addItem(item)
         self.rect_items[diff.id] = item
@@ -285,7 +299,7 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
                 lw = self.current_list()
                 if lw is None:
                     break
-                color = CATEGORY_COLOR_MAP.get(diff.category, QtGui.QColor('#ff0000'))
+                color = CATEGORY_COLOR_MAP.get(diff.category, QtGui.QColor("#ff0000"))
 
                 item = QtWidgets.QListWidgetItem()
                 item.setData(QtCore.Qt.UserRole, diff.id)
@@ -296,12 +310,16 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
                 gl.setHorizontalSpacing(HSP)
 
                 title = QtWidgets.QLabel(f"目标{global_idx}")
-                title.setStyleSheet(f"color:{color.name()}; font-size:12px; font-weight:600;")
+                title.setStyleSheet(
+                    f"color:{color.name()}; font-size:12px; font-weight:600;"
+                )
 
                 visibled = QtWidgets.QCheckBox()
                 visibled.setChecked(diff.visible)
                 visibled.setToolTip("显示/隐藏红框")
-                visibled.toggled.connect(lambda checked, _id=diff.id: self.on_visibled_toggled(_id, checked))
+                visibled.toggled.connect(
+                    lambda checked, _id=diff.id: self.on_visibled_toggled(_id, checked)
+                )
 
                 level_combo = QtWidgets.QComboBox()
                 level_combo.setObjectName(f"level_{diff.id}")
@@ -317,12 +335,16 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
                 )
                 # 简单样式（可要可不要）
                 level_combo.setFixedWidth(64)
-                level_combo.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Fixed)
+                level_combo.setSizePolicy(
+                    QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Fixed
+                )
 
                 enabled_box = QtWidgets.QCheckBox()
                 enabled_box.setChecked(diff.enabled)
                 enabled_box.setToolTip("开启后可拖动/调整红框")
-                enabled_box.toggled.connect(lambda checked, _id=diff.id: self.on_enabled_toggled(_id, checked))
+                enabled_box.toggled.connect(
+                    lambda checked, _id=diff.id: self.on_enabled_toggled(_id, checked)
+                )
 
                 btn_delete = QtWidgets.QToolButton()
                 btn_delete.setToolTip("删除该目标")
@@ -337,11 +359,15 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
                     "QToolButton{border:none;background:transparent;}"
                     "QToolButton:hover{background:rgba(220,53,69,0.12);border-radius:4px;}"
                 )
-                btn_delete.clicked.connect(lambda _=False, _id=diff.id: self.delete_diff_by_id(_id))
+                btn_delete.clicked.connect(
+                    lambda _=False, _id=diff.id: self.delete_diff_by_id(_id)
+                )
 
                 # ---- 尺寸策略 ----
                 for wid in (visibled, enabled_box, btn_delete, title, level_combo):
-                    wid.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Fixed)
+                    wid.setSizePolicy(
+                        QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Fixed
+                    )
 
                 visibled.setFixedWidth(COL_FIXED[0])
                 title.setFixedWidth(COL_FIXED[1])
@@ -354,16 +380,20 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
                     gl.setColumnStretch(col, 0)
                 gl.setColumnStretch(2, 1)
 
-                gl.addWidget(visibled,     0, 0)
-                gl.addWidget(title,        0, 1)
-                gl.addWidget(level_combo,  0, 2)
-                gl.addWidget(enabled_box,  0, 3)
-                gl.addWidget(btn_delete,   0, 4)
+                gl.addWidget(visibled, 0, 0)
+                gl.addWidget(title, 0, 1)
+                gl.addWidget(level_combo, 0, 2)
+                gl.addWidget(enabled_box, 0, 3)
+                gl.addWidget(btn_delete, 0, 4)
 
                 ncols = 5
-                row_min_w = sum(COL_FIXED.values()) + HSP*(ncols-1) + MARG[0] + MARG[2]
+                row_min_w = (
+                    sum(COL_FIXED.values()) + HSP * (ncols - 1) + MARG[0] + MARG[2]
+                )
                 w.setMinimumWidth(row_min_w)
-                w.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
+                w.setSizePolicy(
+                    QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed
+                )
 
                 w.setLayout(gl)
                 item.setSizeHint(w.sizeHint())
@@ -375,7 +405,8 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
 
             # 重建后默认不选中任何行（避免触发回调后的选中联动）
             if lst:
-                lst.clearSelection(); lst.setCurrentRow(-1)
+                lst.clearSelection()
+                lst.setCurrentRow(-1)
 
         finally:
             self._rebuilding = False
@@ -387,9 +418,8 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
 
         self._update_ordinals()
 
-
     def on_list_selection_changed(self) -> None:
-        if getattr(self, '_rebuilding', False) or self._syncing_selection:
+        if getattr(self, "_rebuilding", False) or self._syncing_selection:
             return
         # reflect list selection to scene items (both up/down)
         if self._syncing_selection:
@@ -488,26 +518,6 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
             self.scene.removeItem(u)
             u.deleteLater()
 
-        # 1) 删除对应输出图片，并重命名后续序号
-        try:
-            level_dir = self.level_dir()
-            # 删除 {self.name}_region{deleted_index}.png
-            victim = os.path.join(level_dir, f"A", f"{self.name}_region{deleted_index}.png")
-            if os.path.isfile(victim):
-                os.remove(victim)
-            # 将 {self.name}_region{i}.png -> {self.name}_region{i-1}.png (i 从 deleted_index+1 到 old_count)
-            for i in range(deleted_index + 1, old_count + 1):
-                src = os.path.join(level_dir, f"A", f"{self.name}_region{i}.png")
-                dst = os.path.join(level_dir, f"A", f"{self.name}_region{i-1}.png")
-                if os.path.isfile(src):
-                    # 若目标已存在（理论上不该发生），先移除目标以避免跨平台报错
-                    if os.path.isfile(dst):
-                        os.remove(dst)
-                    shutil.move(src, dst)
-        except Exception:
-            # 静默处理文件系统异常，避免影响UI流
-            pass
-
         # 2) 立即持久化当前配置与元信息（不做校验，避免未填写文本阻塞）
         self._write_config_snapshot()
 
@@ -568,7 +578,6 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
             if it:
                 it.setExternalSelected(True, raise_z=True)
 
-
     def refresh_visibility(self) -> None:
         show_regions = self.toggle_regions.isChecked()
         show_hints = self.toggle_hints.isChecked()
@@ -578,13 +587,8 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
             item.setVis(show_click_region, show_regions, show_hints, show_labels)
             item.updateEnabledFlags()
 
-    def level_dir(self) -> str:
-        # directory for this level
-        return os.path.join(self.config_dir, f"{self.name}")
-
     def config_json_path(self) -> str:
-        return os.path.join(self.level_dir(), f"A", f"config.json")
-
+        return os.path.join(self.config_dir, f"{self.name}.json")
 
     def validate_before_save(self) -> Tuple[bool, Optional[str]]:
         # circle overlap <= 10%
@@ -613,7 +617,12 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
                 # circle-circle intersection area formula
                 alpha = math.acos((r1 * r1 + d * d - r2 * r2) / (2 * r1 * d))
                 beta = math.acos((r2 * r2 + d * d - r1 * r1) / (2 * r2 * d))
-                inter_area = r1 * r1 * alpha + r2 * r2 * beta - 0.5 * math.sin(2 * alpha) * r1 * r1 - 0.5 * math.sin(2 * beta) * r2 * r2
+                inter_area = (
+                    r1 * r1 * alpha
+                    + r2 * r2 * beta
+                    - 0.5 * math.sin(2 * alpha) * r1 * r1
+                    - 0.5 * math.sin(2 * beta) * r2 * r2
+                )
             small_area = 3.141592653589793 * min(r1, r2) ** 2
             return inter_area / max(1.0, small_area)
 
@@ -623,9 +632,13 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
             for j in range(i + 1, n):
                 ratio = circle_overlap_ratio(circles[i], circles[j])
                 if ratio > 0.10:
-                    violations.append(f"茬点{i + 1} 与 茬点{j + 1} 重叠 {ratio * 100:.1f}% (>10%)")
+                    violations.append(
+                        f"茬点{i + 1} 与 茬点{j + 1} 重叠 {ratio * 100:.1f}% (>10%)"
+                    )
         if violations:
-            return False, "存在圆形区域重叠超过10%的情况：\n" + "\n".join(violations[:10])
+            return False, "存在圆形区域重叠超过10%的情况：\n" + "\n".join(
+                violations[:10]
+            )
 
         return True, None
 
@@ -663,70 +676,14 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
         # 3) UI 脏
         self._make_dirty()
 
-    def on_regen_circles(self) -> None:
-        if not self.differences:
-            QtWidgets.QMessageBox.information(self, "提示", "当前没有可用的茬点，请先添加茬点。")
-            return
-        allowed_counts = {15, 20, 25, 30, 35}
-        if len(self.differences) not in allowed_counts:
-            QtWidgets.QMessageBox.information(
-                self,
-                "提示",
-                f"当前茬点数为 {len(self.differences)}，仅支持 15、20、25、30、35 个，请调整后再生成。"
-            )
-            return
-        progress = QtWidgets.QProgressDialog("正在生成，请稍候...", None, 0, 0, self)
-        progress.setWindowModality(QtCore.Qt.ApplicationModal)
-        progress.setCancelButton(None)
-        progress.setMinimumDuration(0)
-        progress.setAutoClose(False)
-        progress.setAutoReset(False)
-        progress.show()
-        QtWidgets.QApplication.processEvents(QtCore.QEventLoop.AllEvents, 50)
-
-        level_dir = self.level_dir()
-        success = False
-        try:
-            os.makedirs(os.path.join(level_dir, "A"), exist_ok=True)
-            os.makedirs(os.path.join(level_dir, "B"), exist_ok=True)
-
-            src_b_path = self.entry.image_path
-            src_b = QtGui.QImage(src_b_path)
-            if src_b.isNull():
-                QtWidgets.QMessageBox.warning(self, "生成失败", f"无法读取图片：{src_b_path}")
-                return
-
-            progress.setLabelText("正在裁剪区域...")
-            QtWidgets.QApplication.processEvents(QtCore.QEventLoop.AllEvents, 50)
-
-            for idx, d in enumerate(self.differences, start=1):
-                W, H = src_b.width(), src_b.height()
-                l, t, w, h = quantize_roi(d.x, d.y, d.width, d.height, W, H)
-                cropped = src_b.copy(int(l), int(t), int(w), int(h))
-                out_path = os.path.join(level_dir, "A", f"{self.name}_region{idx}.png")
-                cropped.save(out_path)
-                QtWidgets.QApplication.processEvents(QtCore.QEventLoop.AllEvents, 50)
-
-            progress.setLabelText("正在生成预览...")
-            QtWidgets.QApplication.processEvents(QtCore.QEventLoop.AllEvents, 50)
-
-            # 使用裁剪结果生成预览/绿圈四宫格
-            compose_result(level_dir, self.name, self.ext, self.differences)
-            success = True
-            QtWidgets.QMessageBox.information(self, "生成完成", "区域图与预览已生成")
-        finally:
-            progress.close()
-
-        if success:
-            self._set_all_enabled(False)
-
     def on_generate_click_regions(self) -> None:
         # 生成点击区域
         if not self.differences:
-            QtWidgets.QMessageBox.information(self, "提示", "当前没有可用的茬点，请先添加茬点。")
+            QtWidgets.QMessageBox.information(
+                self, "提示", "当前没有可用的目标，请先添加寻物目标。"
+            )
             return
 
-        # 生成点击区域逻辑
         for d in self.differences:
             if not d.click_customized:
                 d.click_customized = True
@@ -734,7 +691,7 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
                 d.ccy = d.y + d.height / 2
                 d.ca = d.width / 2
                 d.cb = d.height / 2
-                d.cshape = 'rect'
+                d.cshape = "rect"
 
         cur = self.toggle_click_region.isChecked()
         self.toggle_click_region.setChecked(not cur)
@@ -745,25 +702,9 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
         self._make_dirty()
 
     def save_config(self) -> None:
-
-        self._update_status('saved')
+        self._update_status("saved")
         self._write_config_snapshot()
-        file_name = self.name
-        file_ext = self.ext or ".png"
-        level_dir = self.level_dir()
-        os.makedirs(os.path.join(level_dir, "B"), exist_ok=True)
-        os.makedirs(os.path.join(level_dir, "A"), exist_ok=True)
-        # copy 原图
-        try:
-            src_img = self.entry.image_path
-            if os.path.isfile(src_img):
-                dst_img = os.path.join(level_dir, "A", f"{file_name}_origin{file_ext}")
-                if not os.path.exists(dst_img):
-                    shutil.copy2(src_img, dst_img)
-        except Exception:
-            pass
-
-        QtWidgets.QMessageBox.information(self, "成功", f"配置保存成功\n")
+        QtWidgets.QMessageBox.information(self, "成功", "配置保存成功")
 
     def _write_config_snapshot(self) -> None:
         """Write current differences to config.json without validation or UI side-effects.
@@ -783,17 +724,20 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
         file_ext = self.ext
         data = {
             "imageName": f"{file_name}_origin{file_ext}",
-            "imageWidth":int(self.scene.width()),
+            "imageWidth": int(self.scene.width()),
             "imageHeight": int(self.scene.height()),
             "status": self.status,
             "differenceCount": len(self.differences),
-            "differences": []
+            "differences": [],
         }
         for idx, d in enumerate(self.differences):
             points = [
                 {"x": to_percent_x(d.x), "y": to_percent_y_bottom(d.y)},
                 {"x": to_percent_x(d.x + d.width), "y": to_percent_y_bottom(d.y)},
-                {"x": to_percent_x(d.x + d.width), "y": to_percent_y_bottom(d.y + d.height)},
+                {
+                    "x": to_percent_x(d.x + d.width),
+                    "y": to_percent_y_bottom(d.y + d.height),
+                },
                 {"x": to_percent_x(d.x), "y": to_percent_y_bottom(d.y + d.height)},
             ]
             # compute hint circle from stored local center and radius
@@ -818,9 +762,9 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
             entry = {
                 "id": d.id,
                 "name": d.name,
-                "section": ('down' if d.section == 'down' else 'up'),
+                "section": ("down" if d.section == "down" else "up"),
                 "category": d.category or "",
-                "replaceImage": f"{file_name}_region{idx+1}.png",
+                "replaceImage": f"{file_name}_region{idx + 1}.png",
                 "enabled": bool(d.enabled),
                 "points": points,
                 "hintLevel": int(lvl),
@@ -829,27 +773,28 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
                 "click_customized": bool(d.click_customized),  # 只存标记
             }
             if d.click_customized:
-                entry.update({
-                    "click_x": ccx,
-                    "click_y": ccy,
-                    "click_a": d.ca,
-                    "click_b": d.cb,
-                    "click_type": d.cshape
-                })
+                entry.update(
+                    {
+                        "click_x": ccx,
+                        "click_y": ccy,
+                        "click_a": d.ca,
+                        "click_b": d.cb,
+                        "click_type": d.cshape,
+                    }
+                )
 
             data["differences"].append(entry)
 
-        os.makedirs(self.level_dir(), exist_ok=True)
+        os.makedirs(self.config_dir, exist_ok=True)
         cfg_path = self.config_json_path()
-        os.makedirs(os.path.dirname(cfg_path), exist_ok=True)
-        with open(cfg_path, 'w', encoding='utf-8') as f:
+        with open(cfg_path, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
 
     def load_existing_config(self) -> None:
-        dir_path = self.level_dir()
-        if not os.path.isdir(dir_path):
+        cfg_path = self.config_json_path()
+        if not os.path.isfile(cfg_path):
             return
-        self._load_from_dir(dir_path)
+        self._load_from_file(cfg_path)
 
     def _clear_all_items(self) -> None:
         # remove existing rect items from scenes
@@ -862,11 +807,9 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
         self.rect_items.clear()
         self._suppress_scene_selection = False
 
-    def _load_from_dir(self, dir_path: str) -> None:
-        # read config.json (gracefully handle missing file as new level)
-        cfg_path = os.path.join(dir_path, "A", "config.json")
+    def _load_from_file(self, cfg_path: str) -> None:
+        # read config.json
         if not os.path.isfile(cfg_path):
-            # treat as a new blank level
             self._clear_all_items()
             self.differences.clear()
             self.rebuild_lists()
@@ -875,7 +818,7 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
             self._update_window_title()
             return
         try:
-            with open(cfg_path, 'r', encoding='utf-8') as f:
+            with open(cfg_path, "r", encoding="utf-8") as f:
                 cfg = json.load(f)
         except Exception as exc:
             QtWidgets.QMessageBox.critical(self, "加载失败", str(exc))
@@ -892,53 +835,59 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
             return (1.0 - py) * h
 
         self._clear_all_items()
-        self._update_status(cfg.get('status', "unsaved"))
+        self._update_status(cfg.get("status", "unsaved"))
         self.differences.clear()
-        for diff in cfg.get('differences', []):
-            points = diff.get('points', [])
+        for diff in cfg.get("differences", []):
+            points = diff.get("points", [])
             if len(points) < 4:
                 continue
-            xs = [from_percent_x(p['x']) for p in points]
-            ys = [from_percent_y_bottom(p['y']) for p in points]
+            xs = [from_percent_x(p["x"]) for p in points]
+            ys = [from_percent_y_bottom(p["y"]) for p in points]
             min_x, max_x = min(xs), max(xs)
             min_y, max_y = min(ys), max(ys)
-            c_x = float(diff.get('circleCenter', {}).get('x', -1))
-            c_y = float(diff.get('circleCenter', {}).get('y', -1))
+            c_x = float(diff.get("circleCenter", {}).get("x", -1))
+            c_y = float(diff.get("circleCenter", {}).get("y", -1))
             cpx = from_percent_x(c_x)
             cpy = from_percent_y_bottom(c_y)
-            
+
             w_rect = max(MIN_RECT_SIZE, max_x - min_x)
             h_rect = max(MIN_RECT_SIZE, max_y - min_y)
-            raw_level = diff.get('hintLevel', 1)
+            raw_level = diff.get("hintLevel", 1)
             lvl = clamp_level(raw_level)
 
             # 3) 二次点击区域（自定义 vs 回退）
             #    兼容两种判断：显式标记 或 字段存在即视为自定义
-            click_customized = bool(diff.get('click_customized', False))
-            has_click_fields = ('click_x' in diff and 'click_y' in diff and
-                                'click_a' in diff and 'click_b' in diff)
+            click_customized = bool(diff.get("click_customized", False))
+            has_click_fields = (
+                "click_x" in diff
+                and "click_y" in diff
+                and "click_a" in diff
+                and "click_b" in diff
+            )
             use_custom = click_customized and has_click_fields
-            shape = str(diff.get('click_type', 'rect'))  # 'rect' | 'ellipse' | 'circle'(如有)
+            shape = str(
+                diff.get("click_type", "rect")
+            )  # 'rect' | 'ellipse' | 'circle'(如有)
 
             if use_custom:
                 # click_x/click_y 为百分比(0~1)，反归一化为像素；a/b 按当前写法为像素半轴
-                ccx_abs = from_percent_x(float(diff.get('click_x', 0.0)))
-                ccy_abs = from_percent_y_bottom(float(diff.get('click_y', 0.0)))
-                ca = float(diff.get('click_a', 0.0))
-                cb = float(diff.get('click_b', 0.0))
+                ccx_abs = from_percent_x(float(diff.get("click_x", 0.0)))
+                ccy_abs = from_percent_y_bottom(float(diff.get("click_y", 0.0)))
+                ca = float(diff.get("click_a", 0.0))
+                cb = float(diff.get("click_b", 0.0))
             else:
-                ccx_abs = min_x + w_rect/2.0
-                ccy_abs = min_y + h_rect/2.0
-                ca = w_rect/2.0
-                cb = h_rect/2.0
+                ccx_abs = min_x + w_rect / 2.0
+                ccy_abs = min_y + h_rect / 2.0
+                ca = w_rect / 2.0
+                cb = h_rect / 2.0
 
             d = Difference(
-                id=str(diff.get('id', now_id())),
-                name=str(diff.get('name', f"不同点 {len(self.differences) + 1}")),
-                section=('down' if diff.get('section') == 'down' else 'up'),
-                category=str(diff.get('category', "")),
-                label=str(diff.get('label', "")),
-                enabled=bool(diff.get('enabled', True)),
+                id=str(diff.get("id", now_id())),
+                name=str(diff.get("name", f"不同点 {len(self.differences) + 1}")),
+                section=("down" if diff.get("section") == "down" else "up"),
+                category=str(diff.get("category", "")),
+                label=str(diff.get("label", "")),
+                enabled=bool(diff.get("enabled", True)),
                 visible=True,
                 x=min_x,
                 y=min_y,
@@ -952,14 +901,13 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
                 ccx=float(ccx_abs),
                 ccy=float(ccy_abs),
                 ca=float(ca),
-                cb=float(cb)
+                cb=float(cb),
             )
             self.differences.append(d)
             self._add_rect_items(d)
 
         self.rebuild_lists()
         self.update_total_count()
-
 
     def _update_ordinals(self) -> None:
         """按 self.differences 当前顺序为每个图元设置 1-based 序号。"""
@@ -970,17 +918,19 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
 
     def closeEvent(self, event: QtGui.QCloseEvent) -> None:
         # 未保存时提示
-        if getattr(self, '_is_dirty', False):
+        if getattr(self, "_is_dirty", False):
             ret = QtWidgets.QMessageBox.question(
                 self,
                 "未保存",
                 "当前修改尚未保存，是否保存后再关闭？",
-                QtWidgets.QMessageBox.Save | QtWidgets.QMessageBox.Discard | QtWidgets.QMessageBox.Cancel,
+                QtWidgets.QMessageBox.Save
+                | QtWidgets.QMessageBox.Discard
+                | QtWidgets.QMessageBox.Cancel,
                 QtWidgets.QMessageBox.Save,
             )
             if ret == QtWidgets.QMessageBox.Save:
                 self.on_save_clicked()
-                if getattr(self, '_is_dirty', False):
+                if getattr(self, "_is_dirty", False):
                     event.ignore()
                     return
                 event.accept()
