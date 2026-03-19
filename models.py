@@ -7,7 +7,7 @@ RADIUS_LEVELS: List[int] = [53, 59, 65, 71, 76, 81, 85, 90, 95, 100, 105,110, 11
 # Min rectangle size (natural pixels)
 MIN_RECT_SIZE: float = 110
 
-CANVAS_W, CANVAS_H = 1024, 1024  # 4:3
+CANVAS_W, CANVAS_H = 2048, 2048
 
 CATEGORY_COLOR_MAP: Dict[str, QtGui.QColor] = {
     '情感': QtGui.QColor('#ff7f50'),

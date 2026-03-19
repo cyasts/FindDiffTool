@@ -21,28 +21,22 @@ def clamp_level(level: int) -> int:
     return 1 if lvl < 1 else (n if lvl > n else lvl)
 
 class DifferenceEditorWindow(QtWidgets.QMainWindow):
-    def __init__(self, pair, config_dir: str, parent: Optional[QtWidgets.QWidget] = None) -> None:
+    def __init__(self, entry, config_dir: str, parent: Optional[QtWidgets.QWidget] = None) -> None:
         super().__init__(parent)
-        self.pair = pair
+        self.entry = entry
         self.config_dir = config_dir
-        self.setWindowTitle(f"不同点编辑器 - {self.pair.name}")
+        self.setWindowTitle(f"找猫编辑器 - {self.entry.name}")
         self.resize(1600, 1080)
         self._add_btns = list()
         self.setAttribute(QtCore.Qt.WA_DeleteOnClose, True)
 
         # load images
-        self.up_pix = QtGui.QPixmap(self.pair.image_path_a)
-        self.down_pix = QtGui.QPixmap(self.pair.image_path_b)
-        self.name = self.pair.name
-        self.ext = os.path.splitext(os.path.basename(self.pair.image_path_a))[1]
+        self.pix = QtGui.QPixmap(self.entry.image_path)
+        self.name = self.entry.name
+        self.ext = os.path.splitext(os.path.basename(self.entry.image_path))[1]
 
-        if self.up_pix.isNull() or self.down_pix.isNull():
-            QtWidgets.QMessageBox.critical(self, "加载失败", "无法加载 A/B 图片")
-            self.close()
-            return
-
-        if self.up_pix.size() != self.down_pix.size():
-            QtWidgets.QMessageBox.critical(self, "加载失败", "A/B 图片尺寸不一致，无法编辑")
+        if self.pix.isNull():
+            QtWidgets.QMessageBox.critical(self, "加载失败", "无法加载图片")
             self.close()
             return
 
@@ -54,11 +48,9 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
         vbox_root.setContentsMargins(8, 8, 8, 8)
         vbox_root.setSpacing(8)
 
-        # Two sections (up/down)
-        self.up_scene = ImageScene(self.up_pix)
-        self.down_scene = ImageScene(self.down_pix)
-        self.up_view = ImageView(self.up_scene)
-        self.down_view = ImageView(self.down_scene)
+        # Single section
+        self.scene = ImageScene(self.pix)
+        self.view = ImageView(self.scene)
 
         self.toggle_click_region = QtWidgets.QCheckBox("显示点击区域")
         self.toggle_click_region.setChecked(False)
@@ -67,7 +59,7 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
         self.toggle_hints = QtWidgets.QCheckBox("显示绿圈")
         self.toggle_hints.setChecked(True)
 
-        # 主体：左侧上下图，右侧单一侧栏（仅用于下图添加）
+        # 主体：左侧单图，右侧侧栏
         main_split = QtWidgets.QHBoxLayout()
         main_split.setContentsMargins(0, 0, 0, 0)
         main_split.setSpacing(8)
@@ -75,14 +67,13 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
         left_col = QtWidgets.QVBoxLayout()
         left_col.setContentsMargins(0, 0, 0, 0)
         left_col.setSpacing(8)
-        left_col.addWidget(self.up_view, 1)
-        left_col.addWidget(self.down_view, 1)
+        left_col.addWidget(self.view, 1)
 
         left_wrap = QtWidgets.QWidget()
         left_wrap.setLayout(left_col)
         main_split.addWidget(left_wrap, 1)
 
-        self.side_panel = self._build_side_panel(section='down')
+        self.side_panel = self._build_side_panel()
         main_split.addWidget(self.side_panel, 0)
         vbox_root.addLayout(main_split, 1)
 
@@ -126,8 +117,7 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
 
         # data
         self.differences: List[Difference] = []
-        self.rect_items_up: Dict[str, DifferenceItem] = {}
-        self.rect_items_down: Dict[str, DifferenceItem] = {}
+        self.rect_items: Dict[str, DifferenceItem] = {}
         self._syncing_rect_update: bool = False
         self._syncing_selection: bool = False
         self._suppress_scene_selection: bool = False
@@ -155,8 +145,7 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
         self.total_count.setStyleSheet("color:#333;font-weight:500;")
 
         # initialize scenes/view
-        QtCore.QTimer.singleShot(0, lambda: self.up_view.fitInView(self.up_scene.sceneRect(), QtCore.Qt.KeepAspectRatio))
-        QtCore.QTimer.singleShot(0, lambda: self.down_view.fitInView(self.down_scene.sceneRect(), QtCore.Qt.KeepAspectRatio))
+        QtCore.QTimer.singleShot(0, lambda: self.view.resetView())
 
         # load existing config if exists
         self.load_existing_config()
@@ -175,7 +164,7 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
 
     def _update_window_title(self) -> None:
         mark = "*" if getattr(self, '_is_dirty', False) else ""
-        self.setWindowTitle(f"不同点编辑器 - {self.pair.name}{mark}")
+        self.setWindowTitle(f"找猫编辑器 - {self.entry.name}{mark}")
 
     def _make_dirty(self) -> None:
         self._is_dirty = True
@@ -195,17 +184,17 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
         self.total_count.setText(f"茬点总计：{len(self.differences)}")
 
     # Side panel with tag buttons and list
-    def _build_side_panel(self, section: str) -> QtWidgets.QWidget:
+    def _build_side_panel(self) -> QtWidgets.QWidget:
         panel = QtWidgets.QWidget()
         panel.setFixedWidth(350)
         layout = QtWidgets.QVBoxLayout(panel)
         layout.setContentsMargins(12, 12, 12, 12)
         layout.setSpacing(8)
 
-        # 单按钮：统一添加到下图，类别固定为“修改”
-        add_btn = QtWidgets.QPushButton("增加茬点")
+        # 单按钮，类别固定为“修改”
+        add_btn = QtWidgets.QPushButton("增加寻物目标")
         add_btn.setObjectName("btn_add_diff")
-        add_btn.clicked.connect(lambda _=False: self.add_difference('down', '修改'))
+        add_btn.clicked.connect(lambda _=False: self.add_difference('修改'))
         color = CATEGORY_COLOR_MAP.get('修改', QtGui.QColor('#ff0000'))
         add_btn.setStyleSheet(f"QPushButton {{ color: #fff; border:none; border-radius:14px; padding:6px 8px; background:{color.name()}; }}")
         add_btn.setFixedHeight(34)
@@ -213,7 +202,7 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
 
         # list
         list_widget = QtWidgets.QListWidget()
-        list_widget.setObjectName("list_down")
+        list_widget.setObjectName("list_main")
         # 支持单选用于高亮
         list_widget.setSelectionMode(QtWidgets.QAbstractItemView.SingleSelection)
         list_widget.itemSelectionChanged.connect(self.on_list_selection_changed)
@@ -224,14 +213,11 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
 
         return panel
 
-    def current_list(self, section: str) -> QtWidgets.QListWidget:
-        # 统一使用下侧列表
-        return self.findChild(QtWidgets.QListWidget, "list_down")
+    def current_list(self) -> QtWidgets.QListWidget:
+        return self.findChild(QtWidgets.QListWidget, "list_main")
 
-    def add_difference(self, section: str, category: str) -> None:
-        # 统一添加到下图
-        section = 'down'
-        scene = self.down_scene
+    def add_difference(self, category: str) -> None:
+        scene = self.scene
         r = scene.sceneRect()
         size = min(r.width(), r.height()) * 0.2
         size = max(MIN_RECT_SIZE, size)
@@ -240,8 +226,8 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
         rect = QtCore.QRectF(r.left() + margin, r.bottom() - margin - size, size, size)
         diff = Difference(
             id=now_id(),
-            name=f"不同点 {len(self.differences) + 1}",
-            section=section,
+            name=f"寻物目标 {len(self.differences) + 1}",
+            section="down", # legacy for config compat
             category=category or "",
             label="",
             enabled=True,
@@ -272,24 +258,21 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
 
     def _add_rect_items(self, diff: Difference) -> None:
         color = CATEGORY_COLOR_MAP.get(diff.category, QtGui.QColor('#ff0000'))
-        item_up = DifferenceItem(diff, color, on_change=self._on_item_chaned, is_up=True)
-        item_down = DifferenceItem(diff, color, on_change=self._on_item_chaned, is_up=False)
-        self.up_scene.addItem(item_up)
-        self.down_scene.addItem(item_down)
-        self.rect_items_up[diff.id] = item_up
-        self.rect_items_down[diff.id] = item_down
+        item = DifferenceItem(diff, color, on_change=self._on_item_chaned, is_up=False)
+        self.scene.addItem(item)
+        self.rect_items[diff.id] = item
         self.refresh_visibility()
 
     def rebuild_lists(self) -> None:
-        down = self.current_list('down')
+        lst = self.current_list()
 
         # ==== 屏蔽信号 + 标记重建中 ====
         self._rebuilding = True
-        block_down = QtCore.QSignalBlocker(down)
+        block_lst = QtCore.QSignalBlocker(lst)
         try:
             # 1) 清空
-            if down:
-                down.clear()
+            if lst:
+                lst.clear()
 
             # === 列宽配置 ===
             # 顺序：可见 | 标题 | 等级 | 启用 | 删除
@@ -299,7 +282,7 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
 
             global_idx = 1
             for diff in self.differences:
-                lw = self.current_list('down')
+                lw = self.current_list()
                 if lw is None:
                     break
                 color = CATEGORY_COLOR_MAP.get(diff.category, QtGui.QColor('#ff0000'))
@@ -312,7 +295,7 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
                 gl.setContentsMargins(*MARG)
                 gl.setHorizontalSpacing(HSP)
 
-                title = QtWidgets.QLabel(f"茬点{global_idx}")
+                title = QtWidgets.QLabel(f"目标{global_idx}")
                 title.setStyleSheet(f"color:{color.name()}; font-size:12px; font-weight:600;")
 
                 visibled = QtWidgets.QCheckBox()
@@ -342,7 +325,7 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
                 enabled_box.toggled.connect(lambda checked, _id=diff.id: self.on_enabled_toggled(_id, checked))
 
                 btn_delete = QtWidgets.QToolButton()
-                btn_delete.setToolTip("删除该茬点")
+                btn_delete.setToolTip("删除该目标")
                 btn_delete.setAutoRaise(True)
                 btn_delete.setFixedSize(24, 24)
                 try:
@@ -391,8 +374,8 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
             self.update_total_count()
 
             # 重建后默认不选中任何行（避免触发回调后的选中联动）
-            if down:
-                down.clearSelection(); down.setCurrentRow(-1)
+            if lst:
+                lst.clearSelection(); lst.setCurrentRow(-1)
 
         finally:
             self._rebuilding = False
@@ -426,12 +409,9 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
         if diff.visible == new_visible:
             return
         diff.visible = new_visible
-        u = self.rect_items_up.get(diff.id)
-        d = self.rect_items_down.get(diff.id)
+        u = self.rect_items.get(diff.id)
         if u:
             u.setVisible(diff.visible)
-        if d:
-            d.setVisible(diff.visible)
 
     def on_enabled_toggled(self, diff_id: str, checked: bool) -> None:
         diff = next((d for d in self.differences if d.id == diff_id), None)
@@ -441,24 +421,20 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
         diff.enabled = checked
         print("on_enabled_toggled:", diff.id, diff.enabled)
 
-        u = self.rect_items_up.get(diff.id)
-        d = self.rect_items_down.get(diff.id)
+        u = self.rect_items.get(diff.id)
         if u:
             u.model.data.enabled = diff.enabled
             u.updateEnabledFlags()
-        if d:
-            d.model.data.enabled = diff.enabled
-            d.updateEnabledFlags()
         self._make_dirty()
         self.update_total_count()
         self.refresh_visibility()
 
     def _sync_diff_enabled_to_items(self, diff: Difference) -> None:
-        """同步 enabled 状态到上下两个红框图元。"""
-        for it in (self.rect_items_up.get(diff.id), self.rect_items_down.get(diff.id)):
-            if it:
-                it.model.data.enabled = bool(diff.enabled)
-                it.updateEnabledFlags()
+        """同步 enabled 状态到红框图元。"""
+        it = self.rect_items.get(diff.id)
+        if it:
+            it.model.data.enabled = bool(diff.enabled)
+            it.updateEnabledFlags()
 
     def _set_all_enabled(self, enabled: bool) -> None:
         """批量开关所有红框的交互能力。"""
@@ -477,8 +453,8 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
         if not diff:
             return
         diff.label = text
-        u = self.rect_items_up.get(diff.id)
-        d = self.rect_items_down.get(diff.id)
+        u = self.rect_items.get(diff.id)
+        d = self.rect_items.get(diff.id)
         self._make_dirty()
         if u:
             u.updateLabel()
@@ -507,14 +483,10 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
         old_count = len(self.differences)
 
         d = self.differences.pop(idx)
-        u = self.rect_items_up.pop(d.id, None)
-        dn = self.rect_items_down.pop(d.id, None)
+        u = self.rect_items.pop(d.id, None)
         if u:
-            self.up_scene.removeItem(u)
+            self.scene.removeItem(u)
             u.deleteLater()
-        if dn:
-            self.down_scene.removeItem(dn)
-            dn.deleteLater()
 
         # 1) 删除对应输出图片，并重命名后续序号
         try:
@@ -546,68 +518,53 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
             self._set_selected_diff(None)
 
     def _set_selected_diff(self, diff_id: Optional[str]) -> None:
-        """按照 diff.section 只在对应区域选中，并同步对应场景的高亮。
-        diff_id 为 None 时清空两侧列表与场景高亮。
-        """
+        """只在唯一区域选中，并同步对应场景的高亮。"""
         prev_id = self._selected_diff_id
         if prev_id == diff_id:
             return
 
-        # 1) 取消旧选中态（两侧都清一次，安全）
+        # 1) 取消旧选中态
         if prev_id is not None:
-            for mapping in (self.rect_items_up, self.rect_items_down):
-                it = mapping.get(prev_id)
-                if it:
-                    it.setExternalSelected(False, raise_z=False)
+            it = self.rect_items.get(prev_id)
+            if it:
+                it.setExternalSelected(False, raise_z=False)
 
         # 2) 记录新选中
         self._selected_diff_id = diff_id
 
-        # diff_id 为 None：清空两侧列表选中并返回
+        # diff_id 为 None：清空列表选中并返回
         if diff_id is None:
             self._syncing_selection = True
             try:
-                for section in ("up", "down"):
-                    lw = self.current_list(section)
-                    if lw:
-                        lw.clearSelection()
-                        lw.setCurrentRow(-1)
+                lst = self.current_list()
+                if lst:
+                    lst.clearSelection()
+                    lst.setCurrentRow(-1)
             finally:
                 self._syncing_selection = False
             return
 
-        # 3) 查找 diff，拿到它的 section
+        # 3) 查 diff
         target_diff = next((d for d in self.differences if d.id == diff_id), None)
-        target_section = target_diff.section if target_diff else None
 
-        # 4) 同步左右两侧列表的选中行：只在目标 section 选中，另一侧清空
+        # 4) 同步列表的选中行
         self._syncing_selection = True
         try:
-            for section in ("up", "down"):
-                lw = self.current_list(section)
-                if lw is None:
-                    continue
-
-                if section != target_section:
-                    lw.clearSelection()
-                    lw.setCurrentRow(-1)
-                    continue
-
-                # 在目标侧定位并选中对应行
+            lst = self.current_list()
+            if lst is not None:
                 row = -1
-                for i in range(lw.count()):
-                    it = lw.item(i)
+                for i in range(lst.count()):
+                    it = lst.item(i)
                     if it and it.data(QtCore.Qt.UserRole) == diff_id:
                         row = i
                         break
-                lw.setCurrentRow(row)
+                lst.setCurrentRow(row)
         finally:
             self._syncing_selection = False
 
-        # 5) 设置场景图元高亮：只在目标侧设置，另一侧保持未选
+        # 5) 设置场景图元高亮
         if target_diff:
-            mapping = self.rect_items_up if target_section == "up" else self.rect_items_down
-            it = mapping.get(diff_id)
+            it = self.rect_items.get(diff_id)
             if it:
                 it.setExternalSelected(True, raise_z=True)
 
@@ -617,10 +574,9 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
         show_hints = self.toggle_hints.isChecked()
         show_labels = False
         show_click_region = self.toggle_click_region.isChecked()
-        for d in (self.rect_items_up, self.rect_items_down):
-            for item in d.values():
-                item.setVis(show_click_region, show_regions, show_hints, show_labels)
-                item.updateEnabledFlags()
+        for item in self.rect_items.values():
+            item.setVis(show_click_region, show_regions, show_hints, show_labels)
+            item.updateEnabledFlags()
 
     def level_dir(self) -> str:
         # directory for this level
@@ -695,14 +651,12 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
         # 1) 写回 dataclass
         diff.hint_level = lvl
 
-        # 2) 通知两个场景的对应 DifferenceItem 重绘（并尽量发信号以便其刷新边界/shape）
-        for it in (self.rect_items_up.get(diff.id), self.rect_items_down.get(diff.id)):
-            if not it:
-                continue
+        # 通知图元更新
+        it = self.rect_items.get(diff.id)
+        if it:
             try:
-                # 模型包的是同一个 dataclass，这里为了让视图可靠刷新，显式通知
                 it.model.data.hint_level = lvl
-                it.model.anyChanged.emit(self)   # 触发 _on_model_any_changed -> update()
+                it.model.anyChanged.emit(self)
             except Exception:
                 it.update()
 
@@ -736,11 +690,10 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
             os.makedirs(os.path.join(level_dir, "A"), exist_ok=True)
             os.makedirs(os.path.join(level_dir, "B"), exist_ok=True)
 
-            # 统一从 B 图裁剪，作为最终区域图
-            src_b_path = self.pair.image_path_b
+            src_b_path = self.entry.image_path
             src_b = QtGui.QImage(src_b_path)
             if src_b.isNull():
-                QtWidgets.QMessageBox.warning(self, "生成失败", f"无法读取 B 图：{src_b_path}")
+                QtWidgets.QMessageBox.warning(self, "生成失败", f"无法读取图片：{src_b_path}")
                 return
 
             progress.setLabelText("正在裁剪区域...")
@@ -800,9 +753,9 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
         level_dir = self.level_dir()
         os.makedirs(os.path.join(level_dir, "B"), exist_ok=True)
         os.makedirs(os.path.join(level_dir, "A"), exist_ok=True)
-        # copy A 图作为 origin
+        # copy 原图
         try:
-            src_img = self.pair.image_path_a
+            src_img = self.entry.image_path
             if os.path.isfile(src_img):
                 dst_img = os.path.join(level_dir, "A", f"{file_name}_origin{file_ext}")
                 if not os.path.exists(dst_img):
@@ -817,8 +770,8 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
         Keeps the on-disk config in sync after deletions/renames.
         """
         # natural size = scene size
-        w = self.up_scene.width()
-        h = self.up_scene.height()
+        w = self.scene.width()
+        h = self.scene.height()
 
         def to_percent_y_bottom(y_px: float) -> float:
             return 1.0 - (y_px / h)
@@ -830,8 +783,8 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
         file_ext = self.ext
         data = {
             "imageName": f"{file_name}_origin{file_ext}",
-            "imageWidth":int(self.up_scene.width()),
-            "imageHeight": int(self.up_scene.height()),
+            "imageWidth":int(self.scene.width()),
+            "imageHeight": int(self.scene.height()),
             "status": self.status,
             "differenceCount": len(self.differences),
             "differences": []
@@ -901,18 +854,12 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
     def _clear_all_items(self) -> None:
         # remove existing rect items from scenes
         self._suppress_scene_selection = True
-        for item in list(self.rect_items_up.values()):
+        for item in list(self.rect_items.values()):
             try:
-                self.up_scene.removeItem(item)
+                self.scene.removeItem(item)
             except Exception:
                 pass
-        for item in list(self.rect_items_down.values()):
-            try:
-                self.down_scene.removeItem(item)
-            except Exception:
-                pass
-        self.rect_items_up.clear()
-        self.rect_items_down.clear()
+        self.rect_items.clear()
         self._suppress_scene_selection = False
 
     def _load_from_dir(self, dir_path: str) -> None:
@@ -935,8 +882,8 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
             return
 
         # natural size = scene size
-        w = self.up_scene.width()
-        h = self.up_scene.height()
+        w = self.scene.width()
+        h = self.scene.height()
 
         def from_percent_x(px: float) -> float:
             return px * w
@@ -1017,10 +964,9 @@ class DifferenceEditorWindow(QtWidgets.QMainWindow):
     def _update_ordinals(self) -> None:
         """按 self.differences 当前顺序为每个图元设置 1-based 序号。"""
         for idx, d in enumerate(self.differences, start=1):
-            it_up   = self.rect_items_up.get(d.id)
-            it_down = self.rect_items_down.get(d.id)
-            if it_up:   it_up.setOrdinal(idx)
-            if it_down: it_down.setOrdinal(idx)
+            it = self.rect_items.get(d.id)
+            if it:
+                it.setOrdinal(idx)
 
     def closeEvent(self, event: QtGui.QCloseEvent) -> None:
         # 未保存时提示

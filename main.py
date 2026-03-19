@@ -11,21 +11,19 @@ IMAGE_EXTENSIONS = {'.png', '.jpg', '.jpeg', '.bmp', '.gif'}
 
 
 @dataclass
-class ImagePair:
+class ImageEntry:
     name: str
     directory: str
-    image_path_a: str
-    image_path_b: str
-    ext_a: str
-    ext_b: str
+    image_path: str
+    ext: str
 
 
 class ImageCard(QtWidgets.QFrame):
     clicked = QtCore.Signal(object)
 
-    def __init__(self, pair: ImagePair, parent: Optional[QtWidgets.QWidget] = None) -> None:
+    def __init__(self, entry: ImageEntry, parent: Optional[QtWidgets.QWidget] = None) -> None:
         super().__init__(parent)
-        self.pair = pair
+        self.entry = entry
         self.setFrameShape(QtWidgets.QFrame.StyledPanel)
         self.setStyleSheet(
             "QFrame { background: white; border-radius: 8px; border: 1px solid #eee; }"
@@ -45,13 +43,13 @@ class ImageCard(QtWidgets.QFrame):
         image_label.setFixedSize(240, 150)
         image_label.setAlignment(QtCore.Qt.AlignCenter)
         image_label.setStyleSheet("border-top-left-radius: 8px; border-top-right-radius: 8px;")
-        pixmap = QtGui.QPixmap(self.pair.image_path_a)
+        pixmap = QtGui.QPixmap(self.entry.image_path)
         if not pixmap.isNull():
             image_label.setPixmap(pixmap.scaled(image_label.size(), QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation))
         layout.addWidget(image_label)
 
         # Title
-        title = QtWidgets.QLabel(self.pair.name, self)
+        title = QtWidgets.QLabel(self.entry.name, self)
         title.setAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter)
         title.setFixedHeight(40)
         title.setStyleSheet(
@@ -61,7 +59,7 @@ class ImageCard(QtWidgets.QFrame):
 
     def mouseReleaseEvent(self, event: QtGui.QMouseEvent) -> None:
         if event.button() == QtCore.Qt.LeftButton:
-            self.clicked.emit(self.pair)
+            self.clicked.emit(self.entry)
         super().mouseReleaseEvent(event)
 
 
@@ -93,7 +91,7 @@ class FlowGrid(QtWidgets.QScrollArea):
                 w.setParent(None)
 
         if not cards:
-            empty = QtWidgets.QLabel("暂无图片\n请点击\"加载图片\"按钮选择包含图片资源的文件夹（文件名需匹配 *_A 与 *_B）")
+            empty = QtWidgets.QLabel("暂无图片\n请点击\"加载图片\"按钮选择包含图片资源的文件夹")
             empty.setAlignment(QtCore.Qt.AlignCenter)
             empty.setStyleSheet("color:#666; padding: 60px 20px;")
             self.grid.addWidget(empty, 0, 0)
@@ -127,7 +125,7 @@ class FlowGrid(QtWidgets.QScrollArea):
 class MainWindow(QtWidgets.QMainWindow):
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle("找不同游戏关卡编辑器")
+        self.setWindowTitle("找猫游戏关卡编辑器")
         self.resize(1100, 760)
 
         self.settings = QtCore.QSettings("FindDifferenceEditor", "PySideApp")
@@ -150,7 +148,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.header = header  # 保存引用，后面算宽度要用
         self.header_layout = header_layout
 
-        self.title_label = QtWidgets.QLabel("找不同游戏关卡编辑器")
+        self.title_label = QtWidgets.QLabel("找猫游戏关卡编辑器")
         self._title_full = self.title_label.text()           # ✅ 记住原文
         self.title_label.setWordWrap(False)
         self.title_label.setSizePolicy(QtWidgets.QSizePolicy.Ignored, QtWidgets.QSizePolicy.Fixed)
@@ -221,23 +219,23 @@ class MainWindow(QtWidgets.QMainWindow):
             self.set_status(f"输出目录已设置: {self.config_dir}")
             self.refresh_config_dir_label()
 
-    def _validate_image_path(self, pair: ImagePair) -> (bool, str):
-        """检查 A/B 文件存在、可读、且 Qt 能加载。"""
-        for label, path in (("A", pair.image_path_a), ("B", pair.image_path_b)):
-            if not path:
-                return False, f"未提供{label}图片路径。"
-            if not os.path.exists(path):
-                return False, f"{label}图片文件不存在：\n{path}"
-            if not os.path.isfile(path):
-                return False, f"{label}不是一个有效文件：\n{path}"
-            if not os.access(path, os.R_OK):
-                return False, f"{label}没有读取权限：\n{path}"
-            pix = QtGui.QPixmap(path)
-            if pix.isNull():
-                reader = QtGui.QImageReader(path)
-                fmt = reader.format().data().decode("ascii", "ignore") if reader.format() else "unknown"
-                err = reader.errorString() if hasattr(reader, "errorString") else "unknown"
-                return False, f"无法加载{label}图片（格式:{fmt}）：\n{path}\n错误：{err}"
+    def _validate_image_path(self, entry: ImageEntry) -> (bool, str):
+        """检查图片文件存在、可读、且 Qt 能加载。"""
+        path = entry.image_path
+        if not path:
+            return False, "未提供图片路径。"
+        if not os.path.exists(path):
+            return False, f"图片文件不存在：\n{path}"
+        if not os.path.isfile(path):
+            return False, f"不是一个有效文件：\n{path}"
+        if not os.access(path, os.R_OK):
+            return False, f"没有读取权限：\n{path}"
+        pix = QtGui.QPixmap(path)
+        if pix.isNull():
+            reader = QtGui.QImageReader(path)
+            fmt = reader.format().data().decode("ascii", "ignore") if reader.format() else "unknown"
+            err = reader.errorString() if hasattr(reader, "errorString") else "unknown"
+            return False, f"无法加载图片（格式:{fmt}）：\n{path}\n错误：{err}"
         return True, ""
 
     def on_load_images(self) -> None:
@@ -251,7 +249,6 @@ class MainWindow(QtWidgets.QMainWindow):
             files = sorted(os.listdir(directory))
         except Exception as exc:
             if from_startup:
-                # 启动时自动加载失败，仅提示状态栏，不打扰用户
                 self.set_status(f"加载图片失败: {exc}")
                 return
             QtWidgets.QMessageBox.critical(self, "加载图片失败", str(exc))
@@ -259,40 +256,22 @@ class MainWindow(QtWidgets.QMainWindow):
 
         image_files = [f for f in files if os.path.splitext(f)[1].lower() in IMAGE_EXTENSIONS]
 
-        paired: dict = {}
+        entries: List[ImageEntry] = []
         for file in image_files:
             stem, ext = os.path.splitext(file)
-            if "_" not in stem:
-                continue
-            base, suffix = stem.rsplit("_", 1)
-            if suffix.lower() not in ("a", "b") or not base:
-                continue
-            entry = paired.setdefault(base, {"A": None, "B": None, "ext_a": None, "ext_b": None})
             full_path = os.path.join(directory, file)
-            if suffix.lower() == "a":
-                entry["A"] = full_path
-                entry["ext_a"] = ext
-            else:
-                entry["B"] = full_path
-                entry["ext_b"] = ext
-
-        pairs: List[ImagePair] = []
-        for base, info in paired.items():
-            if info["A"] and info["B"]:
-                pairs.append(
-                    ImagePair(
-                        name=base,
-                        directory=directory,
-                        image_path_a=info["A"],
-                        image_path_b=info["B"],
-                        ext_a=info["ext_a"] or os.path.splitext(info["A"])[1],
-                        ext_b=info["ext_b"] or os.path.splitext(info["B"])[1],
-                    )
+            entries.append(
+                ImageEntry(
+                    name=stem,
+                    directory=directory,
+                    image_path=full_path,
+                    ext=ext,
                 )
+            )
 
         cards: List[ImageCard] = []
-        for pair in pairs:
-            card = ImageCard(pair)
+        for entry in entries:
+            card = ImageCard(entry)
             card.clicked.connect(self.open_editor)
             cards.append(card)
 
@@ -300,12 +279,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self.image_dir = directory
         self.settings.setValue("imageDir", self.image_dir)
         if from_startup:
-            self.set_status(f"成功加载 {len(cards)} 组图片（来自上次使用的图片目录）")
+            self.set_status(f"成功加载 {len(cards)} 张图片（来自上次使用的图片目录）")
         else:
             if not cards:
-                self.set_status("未找到成对的图片，请确保文件名形如 name_A.jpg 和 name_B.jpg")
+                self.set_status("未找到图片文件")
             else:
-                self.set_status(f"成功加载 {len(cards)} 组图片")
+                self.set_status(f"成功加载 {len(cards)} 张图片")
 
     def refresh_config_dir_label(self) -> None:
         path = self.config_dir if self.config_dir else "未设置"
@@ -320,20 +299,18 @@ class MainWindow(QtWidgets.QMainWindow):
         # keep elided label updated
         self.refresh_config_dir_label()
 
-    def open_editor(self, pair: ImagePair) -> None:
+    def open_editor(self, entry: ImageEntry) -> None:
         if not self.config_dir:
             QtWidgets.QMessageBox.information(self, "提示", "请先设置输出目录")
             return
 
-        ok, reason = self._validate_image_path(pair)
+        ok, reason = self._validate_image_path(entry)
         if not ok:
-            # 弹窗 + 状态栏提示，方便用户知道问题与路径
             QtWidgets.QMessageBox.warning(self, "无法打开图片", reason)
             self.set_status(f"打开失败：{reason.replace(os.linesep, ' ')}")
             return
 
-        win = DifferenceEditorWindow(pair=pair, config_dir=self.config_dir, parent=None)
-        # keep a reference to avoid immediate GC when parented
+        win = DifferenceEditorWindow(entry=entry, config_dir=self.config_dir, parent=None)
         if not hasattr(self, "_open_editors"):
             self._open_editors = []
         self._open_editors.append(win)
@@ -363,7 +340,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
 def main() -> int:
     app = QtWidgets.QApplication(sys.argv)
-    app.setOrganizationName("FindDifferenceEditor")
+    app.setOrganizationName("FindCatEditor")
     app.setApplicationName("PySideApp")
     w = MainWindow()
     CirclePixmapProvider.instance().preload_base()
